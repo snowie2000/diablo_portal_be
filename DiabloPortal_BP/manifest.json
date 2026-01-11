@@ -1,0 +1,34 @@
+{
+    "format_version": 2,
+    "header": {
+        "name": "Town Portal Addon",
+        "description": "Diablo II Style Portals",
+        "uuid": "66c6e9a8-3293-4e31-9793-2792d7714574",
+        "version": [1, 0, 0],
+        "min_engine_version": [1, 21, 0]
+    },
+    "modules": [
+        {
+            "type": "data",
+            "uuid": "7a350711-3312-4217-9e7c-c60384666506",
+            "version": [1, 0, 0]
+        },
+        {
+            "type": "script",
+            "language": "javascript",
+            "uuid": "14088998-0518-4034-8451-c7c4731F2531",
+            "entry": "scripts/main.js",
+            "version": [1, 0, 0]
+        }
+    ],
+    "dependencies": [
+        {
+            "module_name": "@minecraft/server",
+            "version": "2.4.0"
+        },
+        {
+            "uuid": "8f2d5e3c-1b4a-4cce-9d9a-5f3b7c2e1a0d",
+            "version": [1, 0, 0]
+        }
+    ]
+}

@@ -1,0 +1,13 @@
+{
+  "format_version": "1.8.0",
+  "animations": {
+    "animation.high_res.scale_64": {
+      "loop": true,
+      "bones": {
+        "root": {
+          "scale": 0.25
+        }
+      }
+    }
+  }
+}

@@ -7,15 +7,13 @@ const TELEPORT_COOLDOWN_DURATION = 40; // Ticks (2 seconds)
 
 // --- Portal Colors ---
 const PORTAL_COLORS = [
-  // "minecraft:endrod",
-  "minecraft:villager_happy",
+  "minecraft:sculk_sensor_redstone_particle",
+  "minecraft:redstone_repeater_dust_particle",
+  //"minecraft:obsidian_glow_dust_particle",
+  "minecraft:candle_flame_particle",
   "minecraft:basic_flame_particle",
   "minecraft:blue_flame_particle",
-  "minecraft:green_flame_particle",
-  // "minecraft:sculk_soul_particle",
-  // "minecraft:enchanter_particle",
-  // "minecraft:soul_particle",
-  // "minecraft:blue_candle_flame_particle"
+  "minecraft:green_flame_particle"
 ];
 
 // --- Visual Settings ---
@@ -219,7 +217,7 @@ world.beforeEvents.itemUse.subscribe((event) => {
         player.id.split("").reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0)
       ) % PORTAL_COLORS.length;
     const colorParticle = PORTAL_COLORS[colorIndex];
-
+    console.log(colorParticle);
     const rotY = player.getRotation().y;
     const linkId = ++portalIdCounter;
     const fieldPortal = originDim.spawnEntity(PORTAL_ENTITY, spawnLoc); // entrance portal

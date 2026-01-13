@@ -1,20 +1,27 @@
-import { world, system, Dimension, Entity } from "@minecraft/server";
+import { world, system, Dimension, Entity, CommandPermissionLevel, CustomCommandParamType } from "@minecraft/server";
 
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
 const ITEM_ID = "diablo:town_scroll";
+const ITEM_ID_PERMANENT = "diablo:town_scroll_permanent";
 const TELEPORT_COOLDOWN_DURATION = 40; // Ticks (2 seconds)
 
 // --- Portal Colors ---
 const PORTAL_COLORS = [
+  "minecraft:villager_happy",
+  "minecraft:green_flame_particle",
   "minecraft:sculk_sensor_redstone_particle",
   "minecraft:redstone_repeater_dust_particle",
   //"minecraft:obsidian_glow_dust_particle",
   "minecraft:candle_flame_particle",
   "minecraft:basic_flame_particle",
   "minecraft:blue_flame_particle",
-  "minecraft:green_flame_particle"
 ];
+
+const PORTAL_INTERNAL_PARTICLE = "minecraft:end_chest";
+// const PORTAL_INTERNAL_PARTICLE = "minecraft:portal_directional";
+const PORTAL_COUNT = 3;
+const PORTAL_INTERVAL = 3;
 
 // --- Visual Settings ---
 const PORTAL_WIDTH = 0.8;
@@ -33,6 +40,40 @@ const portalInfo = new Map(); // Entity -> { targetLoc, targetDimId, ownerId, is
 const tickingAreas = new Map();
 let chunkLoaderCounter = 0;
 let portalIdCounter = 0;
+
+// Register custom command: /footsteps:trail on|off
+system.beforeEvents.startup.subscribe((event) => {
+  const registry = event.customCommandRegistry;
+
+  registry.registerCommand(
+    {
+      name: "diablo:portal_color",
+      description: `Set portal color index (0-${PORTAL_COLORS.length - 1})`,
+      permissionLevel: CommandPermissionLevel.Any,
+      mandatoryParameters: [
+        {
+          name: "index",
+          type: CustomCommandParamType.Integer
+        }
+      ]
+    },
+    (origin, index) => {
+      const player = origin.entity || origin.sourceEntity;
+      if (!player || player.typeId !== "minecraft:player") return;
+
+      if (index < 0 || index >= PORTAL_COLORS.length) {
+        system.run(() => player.sendMessage(`§cInvalid color index. Must be between 0 and ${PORTAL_COLORS.length - 1}.`));
+        return;
+      }
+
+      system.run(() => {
+        player.setDynamicProperty("diablo:portal_color_index", index);
+        player.sendMessage(`§aPortal color set to index ${index}.`);
+      });
+    }
+  );
+});
+
 
 /**
  *
@@ -154,7 +195,7 @@ world.afterEvents.playerLeave.subscribe((event) => {
  */
 world.beforeEvents.itemUse.subscribe((event) => {
   const player = event.source;
-  if (event.itemStack?.typeId !== ITEM_ID) return;
+  if (event.itemStack?.typeId !== ITEM_ID && event.itemStack?.typeId !== ITEM_ID_PERMANENT) return;
 
   if (portalCreatingPlayers.has(player.id)) {
     player.sendMessage("§ePortal creating in progress...");
@@ -212,12 +253,13 @@ world.beforeEvents.itemUse.subscribe((event) => {
     }
 
     // Determine unique color for player
+    const userColorIndex = player.getDynamicProperty("diablo:portal_color_index");
     const colorIndex =
-      Math.abs(
+      (userColorIndex ?? Math.abs(
         player.id.split("").reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0)
-      ) % PORTAL_COLORS.length;
+      )) % PORTAL_COLORS.length;
     const colorParticle = PORTAL_COLORS[colorIndex];
-    console.log(colorParticle);
+    // console.log(colorParticle);
     const rotY = player.getRotation().y;
     const linkId = ++portalIdCounter;
     const fieldPortal = originDim.spawnEntity(PORTAL_ENTITY, spawnLoc); // entrance portal
@@ -360,6 +402,19 @@ function drawPortalEffects(portal) {
       z: location.z + localX * sinRad,
     });
   }
+
+  if (system.currentTick % PORTAL_INTERVAL === 0) {
+    for (let i = 0; i < PORTAL_COUNT; i++) {
+      const angle = Math.random() * 2 * Math.PI;
+      const localX = Math.cos(angle) * PORTAL_WIDTH * Math.random();
+      const localY = Math.sin(angle) * PORTAL_HEIGHT * Math.random();
+      dim.spawnParticle(PORTAL_INTERNAL_PARTICLE, {
+        x: location.x + localX * cosRad,
+        y: centerY + localY,
+        z: location.z + localX * sinRad,
+      });
+    }
+  }
 }
 
 /**
@@ -494,11 +549,14 @@ function teleportPlayer(player, location, dim, currentTick) {
   // Visual Effects before teleportation
   let particleCount = 1;
   const intervalId = system.runInterval(() => {
-    particleCount < 5 && (particleCount += 1);
+    if (particleCount < 3) {
+      particleCount += 1;
+    }
 
     for (let i = 0; i < particleCount; i++) {
       try {
         currentDim.spawnParticle("minecraft:basic_crit_particle", {
+          // currentDim.spawnParticle("minecraft:crop_growth_emitter", {
           x: spawnLoc.x + (Math.random() - 0.5) * 1,
           y: spawnLoc.y + 1.0 + (Math.random() - 0.5) * 1.0,
           z: spawnLoc.z + (Math.random() - 0.5) * 1,
@@ -539,13 +597,17 @@ function destroyPortalPair(linkId) {
 
   // load chunk and remove portals
   ensureChunkLoaded(dimA, locA, () => {
-    activePortals.delete(portalPair.portalA);
-    portalPair.portalA.remove();
+    try {
+      activePortals.delete(portalPair.portalA);
+      portalPair.portalA.remove();
+    } catch { }
   });
 
   ensureChunkLoaded(dimB, locB, () => {
-    activePortals.delete(portalPair.portalB);
-    portalPair.portalB.remove();
+    try {
+      activePortals.delete(portalPair.portalB);
+      portalPair.portalB.remove();
+    } catch { }
   });
 
   // unregister from tables

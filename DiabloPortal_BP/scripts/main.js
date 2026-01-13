@@ -1,4 +1,4 @@
-import { world, system, Dimension, Entity, CommandPermissionLevel, CustomCommandParamType } from "@minecraft/server";
+import { world, system, Dimension, Entity, CommandPermissionLevel, CustomCommandParamType, GameMode } from "@minecraft/server";
 
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
@@ -203,6 +203,11 @@ world.beforeEvents.itemUse.subscribe((event) => {
     return;
   }
 
+  // Check Cooldown
+  if (player.getItemCooldown("scroll") > 0) {
+    return;
+  }
+
   // Use system.run to modify world state from a beforeEvent
   system.run(() => {
     // Diablo logic: One portal per player. Close old one if it exists.
@@ -272,6 +277,23 @@ world.beforeEvents.itemUse.subscribe((event) => {
       creating: true,
       createdAt: system.currentTick,
     });
+
+    // Consume scroll if not permanent and not in creative
+    // console.log(player.getGameMode(), GameMode.creative)
+    if (event.itemStack.typeId === ITEM_ID && player.getGameMode() !== GameMode.Creative) {
+      const inventory = player.getComponent("inventory")?.container;
+      if (inventory) {
+        const item = inventory.getItem(player.selectedSlotIndex);
+        if (item?.typeId === ITEM_ID) {
+          if (item.amount > 1) {
+            item.amount--;
+            inventory.setItem(player.selectedSlotIndex, item);
+          } else {
+            inventory.setItem(player.selectedSlotIndex, undefined);
+          }
+        }
+      }
+    }
 
     // Spawn Portals
     portalCreatingPlayers.add(player.id);

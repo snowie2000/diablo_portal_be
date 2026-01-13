@@ -1,0 +1,33 @@
+{
+  "format_version": "1.20.50",
+  "minecraft:recipe_shaped": {
+    "description": {
+      "identifier": "diablo:town_scroll_p"
+    },
+    "unlock": [
+      {
+        "item": "minecraft:paper"
+      },
+      {
+        "item": "minecraft:diamond"
+      }
+    ],
+    "tags": [ "crafting_table" ],
+    "pattern": [
+      " D ",
+      "DSD",
+	  " D "
+    ],
+    "key": {
+      "D": {
+        "item": "minecraft:diamond"
+      },
+      "S": {
+        "item": "diablo:town_scroll"
+      }
+    },
+    "result": {
+      "item": "diablo:town_scroll_permanent"
+    }
+  }
+}

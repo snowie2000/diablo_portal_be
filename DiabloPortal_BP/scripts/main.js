@@ -7,7 +7,7 @@ const ITEM_ID_PERMANENT = "diablo:town_scroll_permanent";
 const TELEPORT_COOLDOWN_DURATION = 40; // Ticks (2 seconds)
 
 // --- Portal Colors ---
-const PORTAL_COLORS = [
+const PORTAL_COLORS_NATIVE = [
   "minecraft:villager_happy",
   "minecraft:green_flame_particle",
   "minecraft:sculk_sensor_redstone_particle",
@@ -17,6 +17,10 @@ const PORTAL_COLORS = [
   "minecraft:basic_flame_particle",
   "minecraft:blue_flame_particle",
 ];
+
+const PORTAL_COLORS = [
+  "diablo:portal_blue"
+]
 
 const PORTAL_INTERNAL_PARTICLE = "minecraft:end_chest";
 // const PORTAL_INTERNAL_PARTICLE = "minecraft:portal_directional";
@@ -391,7 +395,7 @@ system.runInterval(() => {
       }
     }
   }
-}, 2);
+}, 4);
 
 /**
  * Renders the visual particle ring for a portal.
@@ -399,17 +403,24 @@ system.runInterval(() => {
  */
 function drawPortalEffects(portal) {
   const location = portal.location;
-  const centerY = location.y + 1.2;
+  const dim = portal.dimension;
+  const centerY = location.y + 1.8;
   const rotDeg = GetPortalProperty(portal, "facingRot") || 0;
   const rad = rotDeg * (Math.PI / 180);
   const particleType =
     GetPortalProperty(portal, "colorParticle") ||
     "minecraft:blue_flame_particle";
 
+  dim.spawnParticle("diablo:portal_blue", {
+    x: location.x,
+    y: location.y + 1.2,
+    z: location.z,
+  });
+  return;
+
   // Cached trig values
   const cosRad = Math.cos(rad);
   const sinRad = Math.sin(rad);
-  const dim = portal.dimension;
 
   if (!isChunkLoaded(dim, location)) return; // Skip if chunk not loaded
 
@@ -451,7 +462,7 @@ function drawPortalSpiralEffects(portal) {
   const portalScale = Math.min(1.0, (system.currentTick - createdAt) / 30);
   const rad = rotDeg * (Math.PI / 180);
   const particleType =
-    GetPortalProperty(portal, "colorParticle") ||
+    // GetPortalProperty(portal, "colorParticle") ||
     "minecraft:blue_flame_particle";
 
   const cosRad = Math.cos(rad);

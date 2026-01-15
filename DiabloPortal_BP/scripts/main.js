@@ -1,4 +1,4 @@
-import { world, system, Dimension, Entity, CommandPermissionLevel, CustomCommandParamType, GameMode } from "@minecraft/server";
+import { world, system, Dimension, Entity, CommandPermissionLevel, MolangVariableMap, CustomCommandParamType, GameMode } from "@minecraft/server";
 
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
@@ -378,7 +378,9 @@ system.runInterval(() => {
         drawPortalEffects(portal);
         checkPortalCollision(portal, currentTick, playersInPortal); // check and collect players in portal
       }
-    } catch { }
+    } catch (e) {
+      console.warn("Portal Tick Error:", e);
+    }
   }
 
   for (const playerId of teleportedPlayers) {
@@ -411,11 +413,14 @@ function drawPortalEffects(portal) {
     GetPortalProperty(portal, "colorParticle") ||
     "minecraft:blue_flame_particle";
 
+  const vars = new MolangVariableMap();
+  vars.setFloat("variable.portal_yaw", rotDeg + 180);
+
   dim.spawnParticle("diablo:portal_blue", {
     x: location.x,
     y: location.y + 1.2,
     z: location.z,
-  });
+  }, vars);
   return;
 
   // Cached trig values
@@ -454,7 +459,7 @@ function drawPortalEffects(portal) {
  * Renders a spiral particle pattern radiating outward from the portal.
  * @param {import("@minecraft/server").Entity} portal
  */
-function drawPortalSpiralEffects(portal) {
+function drawPortalSpiralEffects2(portal) {
   const location = portal.location;
   const centerY = location.y + 1.2;
   const rotDeg = GetPortalProperty(portal, "facingRot") || 0;
@@ -507,6 +512,33 @@ function drawPortalSpiralEffects(portal) {
       });
     }
   }
+}
+
+/**
+ * Renders a spiral particle pattern radiating outward from the portal.
+ * @param {import("@minecraft/server").Entity} portal
+ */
+function drawPortalSpiralEffects(portal) {
+  const location = portal.location;
+  const dim = portal.dimension;
+  const centerY = location.y + 1.8;
+  const rotDeg = GetPortalProperty(portal, "facingRot") || 0;
+  const rad = rotDeg * (Math.PI / 180);
+  const particleType =
+    GetPortalProperty(portal, "colorParticle") ||
+    "minecraft:blue_flame_particle";
+
+  const vars = new MolangVariableMap();
+  vars.setFloat("variable.portal_yaw", rotDeg + 180);
+
+  if (system.currentTick % 7 === 0) {
+    dim.spawnParticle("diablo:portal_creating_blue", {
+      x: location.x,
+      y: location.y + 1.2,
+      z: location.z,
+    }, vars);
+  }
+  return;
 }
 
 /**

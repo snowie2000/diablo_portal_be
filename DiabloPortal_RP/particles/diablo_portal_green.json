@@ -2,10 +2,10 @@
   "format_version": "1.10.0",
   "particle_effect": {
     "description": {
-      "identifier": "diablo:portal_blue_creating",
+      "identifier": "diablo:portal_green",
       "basic_render_parameters": {
         "material": "particles_add",
-        "texture": "textures/particle/portal_dot"
+        "texture": "textures/particle/portal_dot_green"
       }
     },
     "components": {
@@ -28,8 +28,8 @@
       },
       "minecraft:particle_appearance_billboard": {
         "size": [
-          "(variable.particle_random_4 > 0.8) ? 0.03 : 0.012",
-          "(variable.particle_random_4 > 0.8) ? 0.03 : 0.012"
+          "(variable.particle_random_4 > 0.75) ? 0.03 : 0.012",
+          "(variable.particle_random_4 > 0.75) ? 0.03 : 0.012"
         ],
         "facing_camera_mode": "lookat_xyz",
         "uv": {
@@ -47,9 +47,9 @@
       },
       "minecraft:particle_motion_parametric": {
         "relative_position": [
-          "(math.cos(variable.particle_age * 30 + variable.particle_random_1 * 360) * (0.7 - variable.particle_age * 0.3)) * math.cos(variable.portal_yaw)",
-          "math.sin(variable.particle_age * 30 + variable.particle_random_1 * 360) * (1.2 - variable.particle_age * 0.6)",
-          "(math.cos(variable.particle_age * 30 + variable.particle_random_1 * 360) * (0.7 - variable.particle_age * 0.3)) * math.sin(variable.portal_yaw)"
+          "(math.cos(variable.particle_age * 30 + variable.particle_random_1 * 360) * ((variable.particle_random_4 > 0.8) ? 0.7 : (0.7 - variable.particle_age * 0.3))) * math.cos(variable.portal_yaw)",
+          "math.sin(variable.particle_age * 30 + variable.particle_random_1 * 360) * ((variable.particle_random_4 > 0.8) ? 1.2 : (1.2 - variable.particle_age * 0.6))",
+          "(math.cos(variable.particle_age * 30 + variable.particle_random_1 * 360) * ((variable.particle_random_4 > 0.8) ? 0.7 : (0.7 - variable.particle_age * 0.3))) * math.sin(variable.portal_yaw)"
         ]
       },
       "minecraft:particle_appearance_tinting": {

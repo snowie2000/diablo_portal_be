@@ -19,7 +19,17 @@ const PORTAL_COLORS_NATIVE = [
 ];
 
 const PORTAL_COLORS = [
-  "diablo:portal_blue"
+  "diablo:portal_blue",
+  "diablo:portal_green",
+  "diablo:portal_red",
+  "diablo:portal_yellow"
+];
+
+const PORTAL_COLORS_CREATING = [
+  "diablo:portal_creating_blue",
+  "diablo:portal_creating_green",
+  "diablo:portal_creating_red",
+  "diablo:portal_creating_yellow"
 ]
 
 const PORTAL_INTERNAL_PARTICLE = "minecraft:end_chest";
@@ -268,7 +278,7 @@ world.beforeEvents.itemUse.subscribe((event) => {
         player.id.split("").reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0)
       )) % PORTAL_COLORS.length;
     const colorParticle = PORTAL_COLORS[colorIndex];
-    // console.log(colorParticle);
+    // console.warn(colorParticle);
     const rotY = player.getRotation().y;
     const linkId = ++portalIdCounter;
     const fieldPortal = originDim.spawnEntity(PORTAL_ENTITY, spawnLoc); // entrance portal
@@ -416,7 +426,7 @@ function drawPortalEffects(portal) {
   const vars = new MolangVariableMap();
   vars.setFloat("variable.portal_yaw", rotDeg + 180);
 
-  dim.spawnParticle("diablo:portal_blue", {
+  dim.spawnParticle(particleType, {
     x: location.x,
     y: location.y + 1.2,
     z: location.z,
@@ -532,7 +542,7 @@ function drawPortalSpiralEffects(portal) {
   vars.setFloat("variable.portal_yaw", rotDeg + 180);
 
   if (system.currentTick % 7 === 0) {
-    dim.spawnParticle("diablo:portal_creating_blue", {
+    dim.spawnParticle(particleType + "_creating", {
       x: location.x,
       y: location.y + 1.2,
       z: location.z,

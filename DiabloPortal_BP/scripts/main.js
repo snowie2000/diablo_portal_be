@@ -233,6 +233,9 @@ world.beforeEvents.itemUse.subscribe((event) => {
 
     const originDim = player.dimension;
     const viewDir = player.getViewDirection();
+    const scaler = Math.sqrt(viewDir.x * viewDir.x + viewDir.z * viewDir.z);
+    viewDir.x /= scaler;
+    viewDir.z /= scaler;
     const spawnLoc = {
       x: player.location.x + viewDir.x * 2,
       y: player.location.y,
@@ -389,7 +392,7 @@ system.runInterval(() => {
         checkPortalCollision(portal, currentTick, playersInPortal); // check and collect players in portal
       }
     } catch (e) {
-      console.warn("Portal Tick Error:", e);
+      console.info("Portal Tick Error:", e);
     }
   }
 
@@ -611,40 +614,21 @@ function teleportPlayerToPortal(player, portal, currentTick) {
  * @param {number} currentTick
  */
 function teleportPlayer(player, location, dim, currentTick) {
-  const currentLoc = player.location;
+  if (teleportedPlayers.has(player.id)) return; // already teleporting
+
   const currentDim = player.dimension;
 
-  const viewDir = player.getViewDirection();
-  const spawnLoc = {
-    x: currentLoc.x + viewDir.x,
-    y: currentLoc.y,
-    z: currentLoc.z + viewDir.z,
-  };
-
-  // Visual Effects before teleportation
-  let particleCount = 1;
   const intervalId = system.runInterval(() => {
-    if (particleCount < 3) {
-      particleCount += 1;
+    try {
+      currentDim.spawnParticle("diablo:teleport", player.location);
+    } catch {
+      system.clearRun(intervalId);
     }
+  }, 20);
 
-    for (let i = 0; i < particleCount; i++) {
-      try {
-        currentDim.spawnParticle("minecraft:basic_crit_particle", {
-          // currentDim.spawnParticle("minecraft:crop_growth_emitter", {
-          x: spawnLoc.x + (Math.random() - 0.5) * 1,
-          y: spawnLoc.y + 1.0 + (Math.random() - 0.5) * 1.0,
-          z: spawnLoc.z + (Math.random() - 0.5) * 1,
-        });
-      } catch {
-        break;
-      }
-    }
-  }, 10);
-
+  teleportedPlayers.add(player.id);
   ensureChunkLoaded(dim, location, () => {
     system.clearRun(intervalId);
-    teleportedPlayers.add(player.id);
     playerCooldowns.set(player.id, currentTick + TELEPORT_COOLDOWN_DURATION);
     player.teleport(location, { dimension: dim });
     player.playSound("mob.endermen.portal");
@@ -829,4 +813,4 @@ system.runInterval(() => {
       }
     } catch (e) { }
   });
-}, 1200);
+}, 200);

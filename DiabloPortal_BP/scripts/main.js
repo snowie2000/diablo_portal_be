@@ -234,8 +234,13 @@ world.beforeEvents.itemUse.subscribe((event) => {
     const originDim = player.dimension;
     const viewDir = player.getViewDirection();
     const scaler = Math.sqrt(viewDir.x * viewDir.x + viewDir.z * viewDir.z);
-    viewDir.x /= scaler;
-    viewDir.z /= scaler;
+    if (scaler) {
+      viewDir.x /= scaler;
+      viewDir.z /= scaler;
+    } else {
+      viewDir.x = 1;
+      viewDir.z = 1;
+    }
     const spawnLoc = {
       x: player.location.x + viewDir.x * 2,
       y: player.location.y,

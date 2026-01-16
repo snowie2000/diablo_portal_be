@@ -4,7 +4,7 @@
         "name": "Town Portal Resource Pack",
         "description": "Diablo II Style Portals Resource Pack",
         "uuid": "8f2d5e3c-1b4a-4cce-9d9a-5f3b7c2e1a0d",
-        "version": [1, 0, 0],
+        "version": [1, 0, 1],
         "min_engine_version": [1, 21, 0]
     },
     "modules": [

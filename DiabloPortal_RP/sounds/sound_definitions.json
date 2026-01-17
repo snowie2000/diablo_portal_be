@@ -1,0 +1,17 @@
+{
+  "format_version": "1.14.0",
+  "sound_definitions": {
+    "diablo.portal_create": {
+      "category": "neutral",
+      "sounds": [
+        "sounds/portal/create"
+      ]
+    },
+    "diablo.portal_teleport": {
+      "category": "neutral",
+      "sounds": [
+        "sounds/portal/teleport"
+      ]
+    }
+  }
+}

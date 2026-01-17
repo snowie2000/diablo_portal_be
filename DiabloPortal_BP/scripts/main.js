@@ -1,4 +1,4 @@
-import { world, system, Dimension, Entity, CommandPermissionLevel, MolangVariableMap, CustomCommandParamType, GameMode } from "@minecraft/server";
+import { world, system, Dimension, Entity, CommandPermissionLevel, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode } from "@minecraft/server";
 
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
@@ -351,7 +351,19 @@ world.beforeEvents.itemUse.subscribe((event) => {
       linkTable.set(linkId, { portalA: fieldPortal, portalB: basePortal });
 
       player.sendMessage("§bTown Portal opened!");
-      player.playSound("mob.illusioner.cast_spell");
+      try {
+        player.playSound("diablo.portal_create", {
+          location: spawnLoc,
+          pitch: 1.0,
+          volume: 1.0
+        });
+        targetDim.playSound("diablo.portal_create", targetLoc, {
+          pitch: 1.0,
+          volume: 1.0
+        });
+      } catch {
+        //ignore sound failure
+      }
       portalCreatingPlayers.delete(player.id);
     });
   });
@@ -635,8 +647,30 @@ function teleportPlayer(player, location, dim, currentTick) {
   ensureChunkLoaded(dim, location, () => {
     system.clearRun(intervalId);
     playerCooldowns.set(player.id, currentTick + TELEPORT_COOLDOWN_DURATION);
+    const nearbyEntities = player.dimension.getEntities({
+      location: player.location,
+      maxDistance: 12,
+    });
+    for (const mob of nearbyEntities) {
+      const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
+      try {
+        // Check if the mob is leashed to THIS player
+        if (leashComponent && leashComponent.leashHolder && leashComponent.leashHolder.id === player.id) {
+          // Teleport the mob to the destination in the target dimension
+          mob.teleport(location, { dimension: dim });
+        }
+      } catch (e) {
+        // Catch errors if an entity is invalid or cannot be teleported
+      }
+    }
     player.teleport(location, { dimension: dim });
-    player.playSound("mob.endermen.portal");
+    system.runTimeout(() => {
+      player.playSound("diablo.portal_teleport", {
+        location: player.location,
+        pitch: 1.0,
+        volume: 1.0
+      });
+    }, 2)
   });
 }
 

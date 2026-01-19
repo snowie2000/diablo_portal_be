@@ -655,36 +655,37 @@ function teleportPlayer(player, location, dim, currentTick) {
       location: player.location,
       maxDistance: 12,
     });
-    let Mount = null;
+    let Mount = undefined;
     for (const mob of nearbyEntities) {
       try {
         const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
         // Check if the mob is leashed to THIS player
         if (leashComponent && leashComponent.leashHolder && leashComponent.leashHolder.id === player.id) {
           // Teleport the mob to the destination in the target dimension
-          mob.teleport(location, { dimension: dim });
+          mob.teleport(location, { dimension: dim, checkForBlocks: false });
         }
         const rideComponent = mob.getComponent(EntityComponentTypes.Rideable);
         // Check if the mob is leashed to THIS player
         if (rideComponent && rideComponent.getRiders().some(rider => rider.id === player.id)) {
           // Teleport the mob to the destination in the target dimension
-          mob.teleport(location, { dimension: dim });
-          Mount = rideComponent;
+          if (!Mount)
+            Mount = rideComponent;
+          mob.teleport(location, { dimension: dim, checkForBlocks: false });
         }
       } catch (e) {
         // Catch errors if an entity is invalid or cannot be teleported
       }
     }
     player.teleport(location, { dimension: dim });
-    if (Mount) {
-      Mount.addRider(player);
-    }
     system.runTimeout(() => {
       player.playSound("diablo.portal_teleport", {
         location: player.location,
         pitch: 1.0,
         volume: 1.0
       });
+      if (Mount) {
+        Mount.addRider(player);
+      }
     }, 2)
   });
 }

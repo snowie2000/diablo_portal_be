@@ -668,9 +668,11 @@ function teleportPlayer(player, location, dim, currentTick) {
         // Check if the mob is leashed to THIS player
         if (rideComponent && rideComponent.getRiders().some(rider => rider.id === player.id)) {
           // Teleport the mob to the destination in the target dimension
-          if (!Mount)
-            Mount = rideComponent;
-          mob.teleport(location, { dimension: dim, checkForBlocks: false });
+          if (!Mount) {
+            Mount = mob;
+            rideComponent.ejectRiders();
+            mob.teleport(location, { dimension: dim, checkForBlocks: false });
+          }
         }
       } catch (e) {
         // Catch errors if an entity is invalid or cannot be teleported
@@ -684,7 +686,9 @@ function teleportPlayer(player, location, dim, currentTick) {
         volume: 1.0
       });
       if (Mount) {
-        Mount.addRider(player);
+        const rideComponent = Mount.getComponent(EntityComponentTypes.Rideable);
+        if (rideComponent)
+          rideComponent.addRider(player);
       }
     }, 2)
   });

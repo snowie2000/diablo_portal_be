@@ -628,6 +628,103 @@ function teleportPlayerToPortal(player, portal, currentTick) {
 }
 
 /**
+ * Safely teleports an entity across dimensions using structures to avoid common bugs.
+ * @param {import("@minecraft/server").Entity} entity
+ * @param {import("@minecraft/server").Vector3} targetLocation
+ * @param {import("@minecraft/server").Dimension} targetDimension
+ */
+function teleportEntitySafely(entity, targetLocation, targetDimension) {
+  const originDim = entity.dimension;
+  if (originDim.id === targetDimension.id) {
+    // Same dimension, direct teleport
+    entity.teleport(targetLocation);
+    return entity;
+  }
+
+  const structName = `tp_${entity.id.replace(/[^a-zA-Z0-9]/g, "_")}`;
+
+  // 1. Find a temporary isolated spot nearby (air block with no other mobs)
+  const startPos = entity.location;
+  let tempPos = null;
+
+  // Search in a small area around the current entity
+  search: for (let dy = 0; dy <= 4; dy++) {
+    for (let dx = -2; dx <= 2; dx++) {
+      for (let dz = -2; dz <= 2; dz++) {
+        const testPos = {
+          x: Math.floor(startPos.x + dx),
+          y: Math.floor(startPos.y + dy),
+          z: Math.floor(startPos.z + dz)
+        };
+        
+        try {
+          const block = originDim.getBlock(testPos);
+          if (block && (block.isAir || block.isLiquid || block.typeId === "minecraft:air")) {
+            // Check for other entities at this spot (excluding the mob itself and players)
+            const entitiesAtSpot = originDim.getEntities({
+              location: { x: testPos.x + 0.5, y: testPos.y, z: testPos.z + 0.5 },
+              maxDistance: 0.5
+            }).filter(e => e.id !== entity.id && e.typeId !== "minecraft:player");
+
+            if (entitiesAtSpot.length === 0) {
+              tempPos = { x: testPos.x + 0.5, y: testPos.y, z: testPos.z + 0.5 };
+              break search;
+            }
+          }
+        } catch {}
+      }
+    }
+  }
+
+  // Fallback to high sky if no spot found nearby
+  if (!tempPos) {
+    let tempY = 310;
+    if (originDim.id.includes("nether")) tempY = 125;
+    else if (originDim.id.includes("the_end")) tempY = 250;
+    tempPos = { x: Math.floor(startPos.x), y: tempY, z: Math.floor(startPos.z) };
+  }
+
+  try {
+    const tagName = `tp_tag_${system.currentTick}`;
+    entity.addTag(tagName);
+    // 2. Teleport to isolated spot
+    entity.teleport(tempPos);
+
+    // 3. Save to memory structure (include entities=true, include blocks=false)
+    originDim.runCommand(`structure save "${structName}" ${Math.floor(tempPos.x)} ${Math.floor(tempPos.y)} ${Math.floor(tempPos.z)} ${Math.floor(tempPos.x)} ${Math.floor(tempPos.y)} ${Math.floor(tempPos.z)} true memory false`);
+
+    // 4. Remove original
+    entity.remove();
+
+    // 5. Load in target dimension
+    targetDimension.runCommand(`structure load "${structName}" ${targetLocation.x.toFixed(2)} ${targetLocation.y.toFixed(2)} ${targetLocation.z.toFixed(2)} 0_degrees none true false`);
+    targetDimension.runCommand(`structure delete "${structName}"`);
+
+    // search for teleported entity by tag
+    const entities = targetDimension.getEntities({
+              location: targetLocation,
+              maxDistance: 3,
+              type: entity.typeId,
+              tags: [tagName]
+    });
+    entities.forEach(e => e.removeTag(tagName));
+    if (entities.length > 0) {
+      return entities[0];
+    }
+  } catch (e) {
+    // Fallback if structure method fails
+    try {
+      console.warn("Entity teleport via structure failed, using direct teleport:", e);
+      if (entity && entity.isValid) {
+        entity.teleport(targetLocation, { dimension: targetDimension });
+        return entity;
+      }
+    } catch { }
+  }
+  return undefined;
+}
+
+/**
  *
  * @param {import("@minecraft/server").Player} player
  * @param {import("@minecraft/server").Vector3} location
@@ -655,24 +752,26 @@ function teleportPlayer(player, location, dim, currentTick) {
       location: player.location,
       maxDistance: 12,
     });
-    let Mount = undefined;
+    let leashedMobs = [], mountedMobs = [];
     for (const mob of nearbyEntities) {
       try {
         const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
         // Check if the mob is leashed to THIS player
         if (leashComponent && leashComponent.leashHolder && leashComponent.leashHolder.id === player.id) {
           // Teleport the mob to the destination in the target dimension
-          mob.teleport(location, { dimension: dim, checkForBlocks: false });
+          const tpMob = teleportEntitySafely(mob, location, dim);
+          if (tpMob) {
+            leashedMobs.push(tpMob);
+          }
         }
         const rideComponent = mob.getComponent(EntityComponentTypes.Rideable);
         // Check if the mob is leashed to THIS player
         if (rideComponent && rideComponent.getRiders().some(rider => rider.id === player.id)) {
-          // Teleport the mob to the destination in the target dimension
-          if (!Mount) {
-            Mount = mob;
             rideComponent.ejectRiders();
-            mob.teleport(location, { dimension: dim, checkForBlocks: false });
-          }
+            const tpMob = teleportEntitySafely(mob, location, dim);
+            if (tpMob) {
+              mountedMobs.push(tpMob);
+            }
         }
       } catch (e) {
         // Catch errors if an entity is invalid or cannot be teleported
@@ -685,11 +784,22 @@ function teleportPlayer(player, location, dim, currentTick) {
         pitch: 1.0,
         volume: 1.0
       });
-      if (Mount) {
-        const rideComponent = Mount.getComponent(EntityComponentTypes.Rideable);
-        if (rideComponent)
-          rideComponent.addRider(player);
-      }
+      leashedMobs.forEach(mob => {
+        if (mob && mob.isValid) {
+          const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
+          if (leashComponent) {
+            leashComponent.leashTo(player);
+          }
+        }
+      });
+      mountedMobs.forEach(mob => {
+        if (mob && mob.isValid) {
+          const rideComponent = mob.getComponent(EntityComponentTypes.Rideable);
+          if (rideComponent) {
+            rideComponent.addRider(player);
+          }
+        }
+      });
     }, 2)
   });
 }

@@ -649,8 +649,8 @@ function teleportEntitySafely(entity, targetLocation, targetDimension) {
     const startPos = entity.location;
     // found all mobs at the spot
     const entitiesAtSpot = originDim.getEntities({
-                location: { x: startPos.x + 0.5, y: startPos.y, z: startPos.z + 0.5 },
-                maxDistance: 0.5
+                location: startPos,
+                maxDistance: 1.5
               }).filter(e => e.typeId !== "minecraft:player");
     entitiesAtSpot.forEach(e=>{
       if (e.id !== entity.id) {

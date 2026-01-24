@@ -1,0 +1,17 @@
+{
+  "compilerOptions": {
+    "target": "ESNext",
+    "module": "ESNext",
+    "moduleResolution": "node",
+    "lib": ["ESNext", "DOM"],
+    "strict": true,
+    "baseUrl": ".",
+    "paths": {
+      "@minecraft/server": ["./DiabloPortal_BP/node_modules/@minecraft/server/index.d.ts"]
+    },
+    "noImplicitAny": false,
+    "skipLibCheck": true,
+    "allowSyntheticDefaultImports": true
+  },
+  "include": ["DiabloPortal_BP/scripts/**/*.ts"]
+}

@@ -1,955 +1,624 @@
-import { world, system, Dimension, Entity, CommandPermissionLevel, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode } from "@minecraft/server";
-
+import { world, system, CommandPermissionLevel, InputPermissionCategory, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode, Player } from "@minecraft/server";
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
 const ITEM_ID = "diablo:town_scroll";
 const ITEM_ID_PERMANENT = "diablo:town_scroll_permanent";
 const TELEPORT_COOLDOWN_DURATION = 40; // Ticks (2 seconds)
-
+let PORTAL_PID = 0;
 // --- Portal Colors ---
 const PORTAL_COLORS_NATIVE = [
-  "minecraft:villager_happy",
-  "minecraft:green_flame_particle",
-  "minecraft:sculk_sensor_redstone_particle",
-  "minecraft:redstone_repeater_dust_particle",
-  //"minecraft:obsidian_glow_dust_particle",
-  "minecraft:candle_flame_particle",
-  "minecraft:basic_flame_particle",
-  "minecraft:blue_flame_particle",
+    "minecraft:villager_happy",
+    "minecraft:green_flame_particle",
+    "minecraft:sculk_sensor_redstone_particle",
+    "minecraft:redstone_repeater_dust_particle",
+    //"minecraft:obsidian_glow_dust_particle",
+    "minecraft:candle_flame_particle",
+    "minecraft:basic_flame_particle",
+    "minecraft:blue_flame_particle",
 ];
-
+var PortalType;
+(function (PortalType) {
+    PortalType[PortalType["Field"] = 0] = "Field";
+    PortalType[PortalType["Base"] = 1] = "Base";
+})(PortalType || (PortalType = {}));
 const PORTAL_COLORS = [
-  "diablo:portal_blue",
-  "diablo:portal_green",
-  "diablo:portal_red",
-  "diablo:portal_yellow"
+    "diablo:portal_blue",
+    "diablo:portal_green",
+    "diablo:portal_red",
+    "diablo:portal_yellow"
 ];
-
 const PORTAL_COLORS_CREATING = [
-  "diablo:portal_creating_blue",
-  "diablo:portal_creating_green",
-  "diablo:portal_creating_red",
-  "diablo:portal_creating_yellow"
-]
-
+    "diablo:portal_creating_blue",
+    "diablo:portal_creating_green",
+    "diablo:portal_creating_red",
+    "diablo:portal_creating_yellow"
+];
 const PORTAL_INTERNAL_PARTICLE = "minecraft:end_chest";
 // const PORTAL_INTERNAL_PARTICLE = "minecraft:portal_directional";
 const PORTAL_COUNT = 3;
 const PORTAL_INTERVAL = 3;
-
 // --- Visual Settings ---
 const PORTAL_WIDTH = 0.8;
 const PORTAL_HEIGHT = 1.2;
 const PARTICLES_PER_TICK = 5;
-
 // --- Runtime State (Optimized Registry) ---
-/** @type {Set<import("@minecraft/server").Entity>} */
 const activePortals = new Set();
 const playerPortals = new Map(); // PlayerID -> LinkID
 const playerCooldowns = new Map(); // PlayerID -> ExpiryTick
 const teleportedPlayers = new Set(); // PlayerID
+const teleportingPlayers = new Set(); // PlayerID
 const portalCreatingPlayers = new Set(); // PlayerID
-const linkTable = new Map(); // LinkID -> { portalA: Entity, portalB: Entity }
-const portalInfo = new Map(); // Entity -> { targetLoc, targetDimId, ownerId, isBase, linkId, colorParticle }
+const linkTable = new Map(); // LinkID -> { portalA, portalB }
+const portalInfo = new Map();
 const tickingAreas = new Map();
 let chunkLoaderCounter = 0;
 let portalIdCounter = 0;
-
 // Register custom command: /footsteps:trail on|off
 system.beforeEvents.startup.subscribe((event) => {
-  const registry = event.customCommandRegistry;
-
-  registry.registerCommand(
-    {
-      name: "diablo:portal_color",
-      description: `Set portal color index (0-${PORTAL_COLORS.length - 1})`,
-      permissionLevel: CommandPermissionLevel.Any,
-      mandatoryParameters: [
-        {
-          name: "index",
-          type: CustomCommandParamType.Integer
-        }
-      ]
-    },
+    const registry = event.customCommandRegistry;
+    registry.registerCommand({
+        name: "diablo:portal_color",
+        description: `Set portal color index (0-${PORTAL_COLORS.length - 1})`,
+        permissionLevel: CommandPermissionLevel.Any,
+        mandatoryParameters: [
+            {
+                name: "index",
+                type: CustomCommandParamType.Integer
+            }
+        ]
+    }, 
+    //@ts-ignore
     (origin, index) => {
-      const player = origin.entity || origin.sourceEntity;
-      if (!player || player.typeId !== "minecraft:player") return;
-
-      if (index < 0 || index >= PORTAL_COLORS.length) {
-        system.run(() => player.sendMessage(`§cInvalid color index. Must be between 0 and ${PORTAL_COLORS.length - 1}.`));
-        return;
-      }
-
-      system.run(() => {
-        player.setDynamicProperty("diablo:portal_color_index", index);
-        player.sendMessage(`§aPortal color set to index ${index}.`);
-      });
-    }
-  );
+        const player = origin.sourceEntity;
+        if (!player || player.typeId !== "minecraft:player" || !(player instanceof Player))
+            return;
+        if (index < 0 || index >= PORTAL_COLORS.length) {
+            system.run(() => player.sendMessage(`§cInvalid color index. Must be between 0 and ${PORTAL_COLORS.length - 1}.`));
+            return;
+        }
+        system.run(() => {
+            player.setDynamicProperty("diablo:portal_color_index", index);
+            player.sendMessage(`§aPortal color set to index ${index}.`);
+        });
+    });
 });
-
-
 /**
- *
- * @param {import("@minecraft/server").Dimension} dim
- * @param {import("@minecraft/server").Vector3} location
- * @param {boolean} updateOnly
+ * Adds or updates a ticking area for portal loading.
  */
 function addTickingArea(dim, location, updateOnly = false) {
-  const name = `portal_loader_${location.x}_${location.y}_${location.z}_${dim.id}`;
-  if (tickingAreas.has(name)) {
-    const info = tickingAreas.get(name);
-    info.lastUsedTick = system.currentTick;
-    return Promise.resolve();
-  }
-  if (updateOnly) return Promise.resolve();
-
-  tickingAreas.set(name, {
-    dimension: dim,
-    location,
-    lastUsedTick: system.currentTick,
-  });
-  system.run(() => {
-    dim.runCommand(
-      `tickingarea add circle ${Math.floor(location.x)} ${Math.floor(
-        location.y
-      )} ${Math.floor(location.z)} 2 ${name} false`
-    );
-  });
-  return Promise.resolve();
-}
-
-system.runInterval(() => {
-  const currentTick = system.currentTick;
-  for (const [name, info] of tickingAreas) {
-    if (currentTick - info.lastUsedTick > 600) {
-      system.run(() => {
-        info.dimension.runCommand(`tickingarea remove ${name}`);
-      });
-      // console.log(`Removed unused ticking area: ${name}`);
-      tickingAreas.delete(name);
+    const name = `portal_loader_${location.x}_${location.y}_${location.z}_${dim.id}`;
+    if (tickingAreas.has(name)) {
+        const info = tickingAreas.get(name);
+        info.lastUsedTick = system.currentTick;
+        return Promise.resolve();
     }
-  }
+    if (updateOnly)
+        return Promise.resolve();
+    tickingAreas.set(name, {
+        dimension: dim,
+        location,
+        lastUsedTick: system.currentTick,
+    });
+    system.run(() => {
+        dim.runCommand(`tickingarea add circle ${Math.floor(location.x)} ${Math.floor(location.y)} ${Math.floor(location.z)} 2 ${name} false`);
+    });
+    return Promise.resolve();
+}
+system.runInterval(() => {
+    const currentTick = system.currentTick;
+    for (const [name, info] of tickingAreas) {
+        if (currentTick - info.lastUsedTick > 600) {
+            system.run(() => {
+                info.dimension.runCommand(`tickingarea remove ${name}`);
+            });
+            tickingAreas.delete(name);
+        }
+    }
 }, 100);
-
-/**
- *
- * @param {Entity} portal
- * @returns
- */
-function GetLinkId(portal) {
-  return GetPortalProperty(portal, "linkId");
-}
-
-/**
- *
- * @param {Entity} portal
- * @param {string} property
- * @returns
- */
-function GetPortalProperty(portal, property) {
-  const p = portalInfo.get(portal);
-  return p ? p[property] : undefined;
-}
-
-/**
- *
- * @param {number} linkId
- * @returns
- */
 function GetPortalPair(linkId) {
-  return linkTable.get(linkId);
+    return linkTable.get(linkId);
 }
-
+function setupPortal(portal) {
+    if (portal.isBase && !portal.locationDetermined) {
+        const old = { ...portal.location };
+        portal.location = findSafeLocation(portal.dim, portal.location);
+        portal.locationDetermined = true;
+        // console.warn(`Portal ${portal.pid} repositioned from (${old.x.toFixed(2)}, ${old.y.toFixed(2)}, ${old.z.toFixed(2)}) to (${portal.location.x.toFixed(2)}, ${portal.location.y.toFixed(2)}, ${portal.location.z.toFixed(2)})`);
+    }
+}
+function spawnPortal(dim, location, properties) {
+    // initialize an empty portal record
+    const portal = {
+        ...properties,
+        locationDetermined: false,
+        pid: ++PORTAL_PID,
+        location,
+        dim,
+    };
+    // if chunk is loaded, spawn immediately, and update location if needed
+    if (isChunkLoaded(dim, location)) {
+        setupPortal(portal);
+    }
+    portalInfo.set(portal.pid, portal); // record by PID
+    return portal;
+}
 /**
  * Initialize registry on start
  */
 system.run(() => {
-  ["overworld", "nether", "the_end"].forEach((dimId) => {
-    try {
-      const dim = world.getDimension(dimId);
-      const entities = dim.getEntities({
-        type: PORTAL_ENTITY,
-        tags: ["active_portal"],
-      });
-      for (const entity of entities) {
-        entity.remove(); // Clean up old portals on startup
-      }
-      dim.runCommand(`tickingarea remove_all`);
-    } catch (e) { }
-  });
+    ["overworld", "nether", "the_end"].forEach((dimId) => {
+        try {
+            const dim = world.getDimension(dimId);
+            const entities = dim.getEntities({
+                type: PORTAL_ENTITY,
+                tags: ["active_portal"],
+            });
+            for (const entity of entities) {
+                entity.remove(); // Clean up old portals on startup
+            }
+            dim.runCommand(`tickingarea remove_all`);
+        }
+        catch (e) { }
+    });
 });
-
 /**
  * Track new portals spawned
  */
 world.afterEvents.entitySpawn.subscribe((event) => {
-  if (event.entity?.typeId === PORTAL_ENTITY) {
-    activePortals.add(event.entity);
-  }
+    if (event.entity?.typeId === PORTAL_ENTITY) {
+        activePortals.add(event.entity);
+    }
 });
-
 /**
  * Debug: Welcome Message
  */
 world.afterEvents.playerSpawn.subscribe((event) => {
-  event.player.sendMessage("§6Portal System Loaded (Optimized)");
+    if (event.initialSpawn) {
+        event.player.sendMessage("§6Diablo Portal System §av1.0.0");
+    }
+    teleportedPlayers.add(event.player.id);
 });
-
 /**
  * Event: Player Leave
- * Destroy portals belonging to the player who left.
  */
 world.afterEvents.playerLeave.subscribe((event) => {
-  const linkId = playerPortals.get(event.playerId);
-  if (linkId !== undefined) {
-    destroyPortalPair(linkId);
-  }
-  teleportedPlayers.delete(event.playerId);
+    const linkId = playerPortals.get(event.playerId);
+    if (linkId !== undefined) {
+        destroyPortalPair(linkId, event.playerId);
+    }
+    teleportedPlayers.delete(event.playerId);
+    teleportingPlayers.delete(event.playerId);
 });
-
 /**
  * Event: Item Use
  */
 world.beforeEvents.itemUse.subscribe((event) => {
-  const player = event.source;
-  if (event.itemStack?.typeId !== ITEM_ID && event.itemStack?.typeId !== ITEM_ID_PERMANENT) return;
-
-  if (portalCreatingPlayers.has(player.id)) {
-    player.sendMessage("§ePortal creating in progress...");
-    event.cancel = true; // Prevent spamming portal creation
-    return;
-  }
-
-  // Check Cooldown
-  if (player.getItemCooldown("scroll") > 0) {
-    return;
-  }
-
-  // Use system.run to modify world state from a beforeEvent
-  system.run(() => {
-    // Diablo logic: One portal per player. Close old one if it exists.
-    const oldLinkId = playerPortals.get(player.id);
-    if (oldLinkId !== undefined) {
-      destroyPortalPair(oldLinkId);
-      // player.sendMessage("§eOld portal closed to open a new one.");
+    const player = event.source;
+    if (!(player instanceof Player))
+        return;
+    if (event.itemStack?.typeId !== ITEM_ID && event.itemStack?.typeId !== ITEM_ID_PERMANENT)
+        return;
+    if (portalCreatingPlayers.has(player.id)) {
+        player.sendMessage("§ePortal creating in progress...");
+        event.cancel = true; // Prevent spamming portal creation
+        return;
     }
-
-    const originDim = player.dimension;
-    const viewDir = player.getViewDirection();
-    const scaler = Math.sqrt(viewDir.x * viewDir.x + viewDir.z * viewDir.z);
-    if (scaler) {
-      viewDir.x /= scaler;
-      viewDir.z /= scaler;
-    } else {
-      viewDir.x = 1;
-      viewDir.z = 1;
+    // Check Cooldown
+    if (player.getItemCooldown("scroll") > 0) {
+        return;
     }
-    const spawnLoc = {
-      x: player.location.x + viewDir.x * 2,
-      y: player.location.y,
-      z: player.location.z + viewDir.z * 2,
-    };
-
-    const spawnPoint = player.getSpawnPoint();
-    if (!spawnPoint) {
-      player.sendMessage(
-        "§cYou can't use the portal without a home. Go find your home now!"
-      );
-      player.playSound("note.bass");
-      return;
-    }
-
-    if (player.isSneaking) {
-      return; // close the portal without creating a new one
-    }
-
-    const targetDim = world.getDimension(spawnPoint.dimension.id);
-    const initialTargetLoc = {
-      x: spawnPoint.x + 1.5,
-      y: spawnPoint.y,
-      z: spawnPoint.z,
-    };
-
-    const distSq =
-      Math.pow(spawnLoc.x - (spawnPoint.x + 0.5), 2) +
-      Math.pow(spawnLoc.y - spawnPoint.y, 2) +
-      Math.pow(spawnLoc.z - (spawnPoint.z + 0.5), 2);
-
-    if (targetDim.id === originDim.id && distSq < 100) {
-      player.sendMessage(
-        "§cYou are already near your home. The portal fizzles out."
-      );
-      return;
-    }
-
-    // Determine unique color for player
-    const userColorIndex = player.getDynamicProperty("diablo:portal_color_index");
-    const colorIndex =
-      (userColorIndex ?? Math.abs(
-        player.id.split("").reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0)
-      )) % PORTAL_COLORS.length;
-    const colorParticle = PORTAL_COLORS[colorIndex];
-    // console.warn(colorParticle);
-    const rotY = player.getRotation().y;
-    const linkId = ++portalIdCounter;
-    const fieldPortal = originDim.spawnEntity(PORTAL_ENTITY, spawnLoc); // entrance portal
-    setupPortalData(fieldPortal, {
-      ownerId: player.id,
-      isBase: false,
-      linkId,
-      facingRot: rotY,
-      colorParticle,
-      creating: true,
-      createdAt: system.currentTick,
-    });
-
-    // Consume scroll if not permanent and not in creative
-    // console.log(player.getGameMode(), GameMode.creative)
-    if (event.itemStack.typeId === ITEM_ID && player.getGameMode() !== GameMode.Creative) {
-      const inventory = player.getComponent("inventory")?.container;
-      if (inventory) {
-        const item = inventory.getItem(player.selectedSlotIndex);
-        if (item?.typeId === ITEM_ID) {
-          if (item.amount > 1) {
-            item.amount--;
-            inventory.setItem(player.selectedSlotIndex, item);
-          } else {
-            inventory.setItem(player.selectedSlotIndex, undefined);
-          }
+    // Use system.run to modify world state from a beforeEvent
+    system.run(() => {
+        const closePortal = () => {
+            const oldLinkId = playerPortals.get(player.id);
+            if (oldLinkId !== undefined) {
+                destroyPortalPair(oldLinkId, player.id);
+            }
+        };
+        const originDim = player.dimension;
+        const viewDir = player.getViewDirection();
+        const scaler = Math.sqrt(viewDir.x * viewDir.x + viewDir.z * viewDir.z);
+        let vx = 1, vz = 1;
+        if (scaler) {
+            vx = viewDir.x / scaler;
+            vz = viewDir.z / scaler;
         }
-      }
-    }
-
-    // Spawn Portals
-    portalCreatingPlayers.add(player.id);
-    // Ensure the home chunk is loaded before spawning the base portal
-    ensureChunkLoaded(targetDim, initialTargetLoc, () => {
-      const targetLoc = findSafeLocation(targetDim, initialTargetLoc);
-
-      const basePortal = targetDim.spawnEntity(PORTAL_ENTITY, targetLoc); // return portal
-
-      playerPortals.set(player.id, linkId);
-
-      setupPortalData(fieldPortal, {
-        targetLoc,
-        targetDim: targetDim.id,
-        ownerId: player.id,
-        isBase: false,
-        linkId,
-        dimId: originDim.id,
-        facingRot: rotY,
-        colorParticle,
-      });
-      setupPortalData(basePortal, {
-        targetLoc: spawnLoc,
-        targetDim: originDim.id,
-        ownerId: player.id,
-        isBase: true,
-        linkId,
-        dimId: targetDim.id,
-        facingRot: 0,
-        colorParticle,
-      });
-      // Register in link tables
-      linkTable.set(linkId, { portalA: fieldPortal, portalB: basePortal });
-
-      player.sendMessage("§bTown Portal opened!");
-      try {
-        player.playSound("diablo.portal_create", {
-          location: spawnLoc,
-          pitch: 1.0,
-          volume: 1.0
+        const spawnLoc = {
+            x: player.location.x + vx * 2,
+            y: player.location.y,
+            z: player.location.z + vz * 2,
+        };
+        const spawnPoint = player.getSpawnPoint();
+        if (!spawnPoint) {
+            player.sendMessage("§cYou can't use the portal without a home. Go find your home now!");
+            player.playSound("note.bass");
+            return;
+        }
+        if (player.isSneaking) {
+            closePortal();
+            return;
+        }
+        const targetDim = world.getDimension(spawnPoint.dimension.id);
+        const initialTargetLoc = {
+            x: spawnPoint.x + 1.5,
+            y: spawnPoint.y,
+            z: spawnPoint.z,
+        };
+        const distSq = Math.pow(spawnLoc.x - (spawnPoint.x + 0.5), 2) +
+            Math.pow(spawnLoc.y - spawnPoint.y, 2) +
+            Math.pow(spawnLoc.z - (spawnPoint.z + 0.5), 2);
+        if (targetDim.id === originDim.id && distSq < 100) {
+            player.sendMessage("§cYou are already at home.");
+            player.playSound("note.bass");
+            return;
+        }
+        closePortal();
+        const userColorIndex = player.getDynamicProperty("diablo:portal_color_index");
+        const colorIndex = (userColorIndex ?? Math.abs(player.id.split("").reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0))) % PORTAL_COLORS.length;
+        const colorParticle = PORTAL_COLORS[colorIndex];
+        const rotY = player.getRotation().y;
+        const linkId = ++portalIdCounter;
+        const fieldPortal = spawnPortal(originDim, spawnLoc, {
+            targetPortal: -1,
+            ownerId: player.id,
+            isBase: false,
+            linkId,
+            facingRot: rotY,
+            colorParticle,
+            creating: true,
+            createdAt: system.currentTick,
         });
-        targetDim.playSound("diablo.portal_create", targetLoc, {
-          pitch: 1.0,
-          volume: 1.0
+        const basePortal = spawnPortal(targetDim, initialTargetLoc, {
+            targetPortal: fieldPortal.pid,
+            ownerId: player.id,
+            isBase: true,
+            linkId,
+            facingRot: 0,
+            colorParticle,
         });
-      } catch {
-        //ignore sound failure
-      }
-      portalCreatingPlayers.delete(player.id);
+        fieldPortal.targetPortal = basePortal.pid; // interlink portals
+        linkTable.set(linkId, { portalA: fieldPortal.pid, portalB: basePortal.pid });
+        playerPortals.set(player.id, linkId);
+        // notify player about portal creation
+        player.sendMessage("§bTown Portal opened!");
+        try {
+            // player.playSound("diablo.portal_create", {
+            //     location: spawnLoc,
+            //     pitch: 1.0,
+            //     volume: 1.0
+            // });
+            targetDim.playSound("diablo.portal_create", initialTargetLoc, {
+                pitch: 1.0,
+                volume: 1.0
+            });
+            originDim.playSound("diablo.portal_create", spawnLoc, {
+                pitch: 1.0,
+                volume: 1.0
+            });
+        }
+        catch { }
+        if (event.itemStack?.typeId === ITEM_ID && player.getGameMode() !== GameMode.Creative) {
+            const inventory = player.getComponent("inventory")?.container;
+            if (inventory) {
+                const item = inventory.getItem(player.selectedSlotIndex);
+                if (item?.typeId === ITEM_ID) {
+                    if (item.amount > 1) {
+                        item.amount--;
+                        inventory.setItem(player.selectedSlotIndex, item);
+                    }
+                    else {
+                        inventory.setItem(player.selectedSlotIndex, undefined);
+                    }
+                }
+            }
+        }
     });
-  });
 });
-
-/**
- * Sets up and stores portal metadata using dynamic properties and tags.
- * @param {import("@minecraft/server").Entity} entity - The portal entity to configure.
- * @param {import("@minecraft/server").Vector3} targetLoc - Destination coordinates.
- * @param {string} targetDim - Destination dimension identifier.
- * @param {string} ownerId - Unique identifier of the player who created the portal.
- * @param {boolean} isBase - Whether this is the portal at the player's spawn point.
- * @param {number} linkId - Shared ID linking the two portals in a pair.
- * @param {number} rotationY - The Y-axis rotation for visual alignment.
- * @param {string} colorParticle - The particle type to use for this portal's color.
- */
-function setupPortalData(entity, properties) {
-  if (!entity || !entity.isValid) return;
-  portalInfo.set(entity, properties);
-  activePortals.add(entity);
-}
-
 /**
  * Main Tick Loop
+ * Every 4 ticks, scan all portals and try to setup uninitialized ones, check for collisions, and draw effects.
  */
 system.runInterval(() => {
-  const currentTick = system.currentTick;
-
-  const playersInPortal = new Set(playerCooldowns.keys());
-  // 1. Process active portals
-  for (const portal of activePortals) {
-    if (!portal.isValid) {
-      // activePortals.delete(portal);
-      continue;
+    const currentTick = system.currentTick;
+    const playersInPortal = new Set(teleportingPlayers); // teleporting players are considered inside portals
+    const portalList = portalInfo.values();
+    for (const portal of portalList) {
+        try {
+            // const isPortalCreating = GetPortalProperty(portal, "creating") || false;
+            // if (isPortalCreating) {
+            //     drawPortalSpiralEffects(portal);
+            // } else {
+            if (isChunkLoaded(portal.dim, portal.location)) {
+                setupPortal(portal);
+                drawPortalEffects(portal);
+                checkPortalCollision(portal, currentTick, playersInPortal);
+            }
+        }
+        catch (e) {
+            console.error("Portal Tick Error:", e);
+        }
     }
-
-    try {
-      const isPortalCreating = GetPortalProperty(portal, "creating") || false;
-      if (isPortalCreating) {
-        drawPortalSpiralEffects(portal);
-      } else {
-        drawPortalEffects(portal);
-        checkPortalCollision(portal, currentTick, playersInPortal); // check and collect players in portal
-      }
-    } catch (e) {
-      console.info("Portal Tick Error:", e);
+    for (const playerId of teleportedPlayers) {
+        if (!playersInPortal.has(playerId)) {
+            teleportedPlayers.delete(playerId);
+        }
     }
-  }
-
-  for (const playerId of teleportedPlayers) {
-    if (!playersInPortal.has(playerId)) {
-      teleportedPlayers.delete(playerId);
+    if (playerCooldowns.size > 0) {
+        for (const [playerId, expiry] of playerCooldowns) {
+            if (currentTick >= expiry) {
+                playerCooldowns.delete(playerId);
+            }
+        }
     }
-  }
-
-  // 2. Cooldown Cleanup (Map is much faster than tags + proximity checks)
-  if (playerCooldowns.size > 0) {
-    for (const [playerId, expiry] of playerCooldowns) {
-      if (currentTick >= expiry) {
-        playerCooldowns.delete(playerId);
-      }
-    }
-  }
 }, 4);
-
-/**
- * Renders the visual particle ring for a portal.
- * @param {import("@minecraft/server").Entity} portal - The portal entity to draw effects around.
- */
 function drawPortalEffects(portal) {
-  const location = portal.location;
-  const dim = portal.dimension;
-  const centerY = location.y + 1.8;
-  const rotDeg = GetPortalProperty(portal, "facingRot") || 0;
-  const rad = rotDeg * (Math.PI / 180);
-  const particleType =
-    GetPortalProperty(portal, "colorParticle") ||
-    "minecraft:blue_flame_particle";
-
-  const vars = new MolangVariableMap();
-  vars.setFloat("variable.portal_yaw", rotDeg + 180);
-
-  dim.spawnParticle(particleType, {
-    x: location.x,
-    y: location.y + 1.2,
-    z: location.z,
-  }, vars);
-  return;
-
-  // Cached trig values
-  const cosRad = Math.cos(rad);
-  const sinRad = Math.sin(rad);
-
-  if (!isChunkLoaded(dim, location)) return; // Skip if chunk not loaded
-
-  for (let i = 0; i < PARTICLES_PER_TICK; i++) {
-    const angle = Math.random() * 2 * Math.PI;
-    const localX = Math.cos(angle) * PORTAL_WIDTH;
-    const localY = Math.sin(angle) * PORTAL_HEIGHT;
-
+    const location = portal.location;
+    const dim = portal.dim;
+    const rotDeg = portal.facingRot || 0;
+    const particleType = portal.colorParticle || "minecraft:blue_flame_particle";
+    const vars = new MolangVariableMap();
+    vars.setFloat("variable.portal_yaw", rotDeg + 180);
     dim.spawnParticle(particleType, {
-      x: location.x + localX * cosRad,
-      y: centerY + localY,
-      z: location.z + localX * sinRad,
-    });
-  }
-
-  if (system.currentTick % PORTAL_INTERVAL === 0) {
-    for (let i = 0; i < PORTAL_COUNT; i++) {
-      const angle = Math.random() * 2 * Math.PI;
-      const localX = Math.cos(angle) * PORTAL_WIDTH * Math.random();
-      const localY = Math.sin(angle) * PORTAL_HEIGHT * Math.random();
-      dim.spawnParticle(PORTAL_INTERNAL_PARTICLE, {
-        x: location.x + localX * cosRad,
-        y: centerY + localY,
-        z: location.z + localX * sinRad,
-      });
-    }
-  }
-}
-
-/**
- * Renders a spiral particle pattern radiating outward from the portal.
- * @param {import("@minecraft/server").Entity} portal
- */
-function drawPortalSpiralEffects2(portal) {
-  const location = portal.location;
-  const centerY = location.y + 1.2;
-  const rotDeg = GetPortalProperty(portal, "facingRot") || 0;
-  const createdAt = GetPortalProperty(portal, "createdAt") || 0;
-  const portalScale = Math.min(1.0, (system.currentTick - createdAt) / 30);
-  const rad = rotDeg * (Math.PI / 180);
-  const particleType =
-    // GetPortalProperty(portal, "colorParticle") ||
-    "minecraft:blue_flame_particle";
-
-  const cosRad = Math.cos(rad);
-  const sinRad = Math.sin(rad);
-  const dim = portal.dimension;
-
-  if (!isChunkLoaded(dim, location)) return; // avoid drawing in unloaded chunks
-  // Horizontal vortex with 3 continuous spiral arms
-  const t = system.currentTick * 0.03; // time-based animation
-  const numArms = 3;
-  const pointsPerArm = Math.ceil(PARTICLES_PER_TICK / numArms);
-
-  for (let arm = 0; arm < numArms; arm++) {
-    const armAngleOffset = (arm / numArms) * Math.PI * 2; // distribute 3 arms evenly
-
-    for (let j = 0; j < pointsPerArm; j++) {
-      // Progress along this arm from outer edge (0) to center (1)
-      const progress = (j / pointsPerArm + t) % 1;
-
-      // Spiral angle: starts at arm's base angle and spirals inward
-      const spiralAmount = progress * Math.PI * 1; // how much the arm curves as it goes inward
-      const angle = armAngleOffset - spiralAmount; // negative for inward spiral
-
-      // Radius decreases as we move toward center
-      const radius = PORTAL_WIDTH * portalScale * (1 - progress * 0.85);
-
-      // Local coordinates in the portal plane
-      const localX = Math.cos(angle) * radius;
-      const localY = Math.sin(angle) * radius * (PORTAL_HEIGHT / PORTAL_WIDTH);
-
-      // Transform to world space with slight depth variation
-      const depthOffset = (1 - progress) * 0.2;
-
-      const worldX = location.x + localX * cosRad - depthOffset * sinRad;
-      const worldY = centerY + localY;
-      const worldZ = location.z + localX * sinRad + depthOffset * cosRad;
-
-      dim.spawnParticle(particleType, {
-        x: worldX,
-        y: worldY,
-        z: worldZ,
-      });
-    }
-  }
-}
-
-/**
- * Renders a spiral particle pattern radiating outward from the portal.
- * @param {import("@minecraft/server").Entity} portal
- */
-function drawPortalSpiralEffects(portal) {
-  const location = portal.location;
-  const dim = portal.dimension;
-  const centerY = location.y + 1.8;
-  const rotDeg = GetPortalProperty(portal, "facingRot") || 0;
-  const rad = rotDeg * (Math.PI / 180);
-  const particleType =
-    GetPortalProperty(portal, "colorParticle") ||
-    "minecraft:blue_flame_particle";
-
-  const vars = new MolangVariableMap();
-  vars.setFloat("variable.portal_yaw", rotDeg + 180);
-
-  if (system.currentTick % 7 === 0) {
-    dim.spawnParticle(particleType + "_creating", {
-      x: location.x,
-      y: location.y + 1.2,
-      z: location.z,
+        x: location.x,
+        y: location.y + 1.2,
+        z: location.z,
     }, vars);
-  }
-  return;
 }
+/*
+function drawPortalSpiralEffects(portal: Entity): void {
+    const location = portal.location;
+    const dim = portal.dimension;
+    const rotDeg = (GetPortalProperty(portal, "facingRot") as number) || 0;
+    const particleType = (GetPortalProperty(portal, "colorParticle") as string) || "minecraft:blue_flame_particle";
 
-/**
- * Checks for player contact with the portal and handles teleportation logic.
- * @param {import("@minecraft/server").Entity} portal - The portal entity to check.
- * @param {number} currentTick - The current system tick for cooldown management.
- */
+    const vars = new MolangVariableMap();
+    vars.setFloat("variable.portal_yaw", rotDeg + 180);
+
+    if (system.currentTick % 7 === 0) {
+        dim.spawnParticle(particleType + "_creating", {
+            x: location.x,
+            y: location.y + 1.2,
+            z: location.z,
+        }, vars);
+    }
+}*/
 function checkPortalCollision(portal, currentTick, playersInPortal) {
-  const players = portal.dimension.getPlayers({
-    location: portal.location,
-    maxDistance: 1.2,
-  });
-
-  for (const player of players) {
-    playersInPortal.add(player.id);
-    if (teleportedPlayers.has(player.id)) {
-      continue; // the player is still in the portal, not moved away
-    }
-    const expiry = playerCooldowns.get(player.id);
-    if (expiry !== undefined && currentTick < expiry) continue;
-
-    const ownerId = GetPortalProperty(portal, "ownerId");
-    const isBase = GetPortalProperty(portal, "isBase");
-    const linkId = GetLinkId(portal);
-
-    if (player.id === ownerId && isBase) {
-      const targetLoc = GetPortalProperty(portal, "targetLoc");
-      const targetDim = world.getDimension(
-        GetPortalProperty(portal, "targetDim")
-      );
-
-      destroyPortalPair(linkId); // destroy portal pairs before teleporting
-      teleportPlayer(player, targetLoc, targetDim, currentTick);
-      player.sendMessage("§cTown Portal closed.");
-      return;
-    }
-
-    teleportPlayerToPortal(player, portal, currentTick);
-  }
-}
-
-/**
- * Teleports a player to the portal's target destination.
- * @param {import("@minecraft/server").Player} player - The player to teleport.
- * @param {import("@minecraft/server").Entity} portal - The portal providing destination data.
- * @param {number} currentTick - The current system tick to set the cooldown.
- */
-function teleportPlayerToPortal(player, portal, currentTick) {
-  const targetLoc = GetPortalProperty(portal, "targetLoc");
-  const targetDim = world.getDimension(GetPortalProperty(portal, "targetDim"));
-
-  teleportPlayer(player, targetLoc, targetDim, currentTick);
-}
-
-/**
- * Safely teleports an entity across dimensions using structures to avoid common bugs.
- * @param {import("@minecraft/server").Entity} entity
- * @param {import("@minecraft/server").Vector3} targetLocation
- * @param {import("@minecraft/server").Dimension} targetDimension
- */
-function teleportEntitySafely(entity, targetLocation, targetDimension) {
-  const originDim = entity.dimension;
-
-  const structName = `tp_struct_${system.currentTick}`;
-  const tagName = `tp_tag_${system.currentTick}`;
-  const tagInvalid = `tp_invalid_${system.currentTick}`;
-
-  try {
-    const startPos = entity.location;
-    // found all mobs at the spot
-    const entitiesAtSpot = originDim.getEntities({
-                location: startPos,
-                maxDistance: 1.5
-              }).filter(e => e.typeId !== "minecraft:player");
-    entitiesAtSpot.forEach(e=>{
-      if (e.id !== entity.id) {
-        e.addTag(tagInvalid); // mark unrelated entities
-      }
+    const players = portal.dim.getPlayers({
+        location: portal.location,
+        maxDistance: 1.2,
     });
-
-    entity.addTag(tagName);
-    // Save to memory structure (include entities=true, include blocks=false)
-    originDim.runCommand(`structure save "${structName}" ${Math.floor(startPos.x)} ${Math.floor(startPos.y)} ${Math.floor(startPos.z)} ${Math.floor(startPos.x)} ${Math.floor(startPos.y)} ${Math.floor(startPos.z)} true memory false`);
-    entitiesAtSpot.forEach(e=>(e.removeTag(tagInvalid))); 
-    // Remove original
-    entity.remove();
-
-    // Load in target dimension
-    targetDimension.runCommand(`structure load "${structName}" ${targetLocation.x.toFixed(2)} ${targetLocation.y.toFixed(2)} ${targetLocation.z.toFixed(2)} 0_degrees none true false`);
-    targetDimension.runCommand(`structure delete "${structName}"`);
-
-    // search for teleported entity by tag
-    targetDimension.getEntities({
-              location: targetLocation,
-              maxDistance: 5,
-              tags: [tagInvalid]
-    }).forEach(e=>(e.isValid && e.remove())); // clean up invalid entities
-
-    const entities = targetDimension.getEntities({
-              location: targetLocation,
-              maxDistance: 5,
-              type: entity.typeId,
-              tags: [tagName]
-    });
-    if (entities.length) {
-      entities[0].removeTag(tagName);
-      return entities[0];
+    // find players in portal area
+    for (const player of players) {
+        playersInPortal.add(player.id);
+        if (teleportedPlayers.has(player.id))
+            continue; // the player has left portal before, we should wait for the player to leave
+        const expiry = playerCooldowns.get(player.id);
+        if (expiry !== undefined && currentTick < expiry)
+            continue;
+        const { ownerId, isBase, linkId } = portal;
+        const targetPortal = portalInfo.get(portal.targetPortal);
+        if (!targetPortal)
+            continue; // portal is broken; TODO: remove broken portals
+        teleportPlayer(player, targetPortal, currentTick);
+        // close portal if it's a base portal and the player is the owner
+        if (player.id === ownerId && isBase && linkId !== undefined) {
+            destroyPortalPair(linkId, player.id);
+            player.sendMessage("§cTown Portal closed.");
+        }
     }
-  } catch (e) {
-    // Fallback if structure method fails
-    try {
-      console.warn("Entity teleport via structure failed, using direct teleport:", e);
-      if (entity && entity.isValid) {
-        entity.teleport(targetLocation, { dimension: targetDimension });
-        return entity;
-      }
-    } catch { }
-  }
-  return undefined;
 }
-
-/**
- *
- * @param {import("@minecraft/server").Player} player
- * @param {import("@minecraft/server").Vector3} location
- * @param {import("@minecraft/server").Dimension} dim
- * @param {number} currentTick
- */
-function teleportPlayer(player, location, dim, currentTick) {
-  if (teleportedPlayers.has(player.id)) return; // already teleporting
-
-  const currentDim = player.dimension;
-
-  const intervalId = system.runInterval(() => {
-    try {
-      currentDim.spawnParticle("diablo:teleport", player.location);
-    } catch {
-      system.clearRun(intervalId);
-    }
-  }, 20);
-
-  teleportedPlayers.add(player.id);
-  ensureChunkLoaded(dim, location, () => {
-    system.clearRun(intervalId);
+function teleportPlayer(player, portal, currentTick) {
+    const { location, dim } = portal;
+    player.dimension.spawnParticle("diablo:teleport", player.location); // teleport start effect
+    teleportedPlayers.add(player.id);
+    teleportingPlayers.add(player.id);
     playerCooldowns.set(player.id, currentTick + TELEPORT_COOLDOWN_DURATION);
+    const leashTag = `leash_temp_${system.currentTick}`;
+    const mountTag = `mount_temp_${system.currentTick}`;
+    const structName = `dp_struct_${system.currentTick}`;
+    const startPos = player.location;
+    const nearbyTag = `nearby_temp_${system.currentTick}`;
+    // find entities leashed or mounted to the player
     const nearbyEntities = player.dimension.getEntities({
-      location: player.location,
-      maxDistance: 12,
-    });
-    let leashedMobs = [], mountedMobs = [];
-    for (const mob of nearbyEntities) {
-      try {
-        const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
-        // Check if the mob is leashed to THIS player
-        if (leashComponent && leashComponent.leashHolder && leashComponent.leashHolder.id === player.id) {
-          // Teleport the mob to the destination in the target dimension
-          const tpMob = teleportEntitySafely(mob, location, dim);
-          if (tpMob) {
-            leashedMobs.push(tpMob);
-          }
-        }
-        const rideComponent = mob.getComponent(EntityComponentTypes.Rideable);
-        // Check if the mob is leashed to THIS player
-        if (rideComponent && rideComponent.getRiders().some(rider => rider.id === player.id)) {
-            rideComponent.ejectRiders();
-            const tpMob = teleportEntitySafely(mob, location, dim);
-            if (tpMob) {
-              mountedMobs.push(tpMob);
-            }
-        }
-      } catch (e) {
-        // Catch errors if an entity is invalid or cannot be teleported
-      }
-    }
-    player.teleport(location, { dimension: dim });
-    system.runTimeout(() => {
-      player.playSound("diablo.portal_teleport", {
         location: player.location,
-        pitch: 1.0,
-        volume: 1.0
-      });
-      leashedMobs.forEach(mob => {
-        if (mob && mob.isValid) {
-          const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
-          if (leashComponent) {
-            leashComponent.leashTo(player);
-          }
-        }
-      });
-      mountedMobs.forEach(mob => {
-        if (mob && mob.isValid) {
-          const rideComponent = mob.getComponent(EntityComponentTypes.Rideable);
-          if (rideComponent) {
-            rideComponent.addRider(player);
-          }
-        }
-      });
-    }, 2)
-  });
-}
-
-/**
- * Removes both portals in a pair based on their shared Link ID.
- * @param {number} linkId - The shared identifier of the portal pair to destroy.
- */
-function destroyPortalPair(linkId) {
-  // this portal must be in a loaded chunk, so we can use it to find the pair
-  const portalPair = GetPortalPair(linkId);
-  if (!portalPair) return;
-
-  const ownerId = GetPortalProperty(portalPair.portalA, "ownerId");
-  const dimA = world.getDimension(
-    GetPortalProperty(portalPair.portalA, "dimId")
-  );
-  const locA = GetPortalProperty(portalPair.portalB, "targetLoc");
-  const dimB = world.getDimension(
-    GetPortalProperty(portalPair.portalB, "dimId")
-  );
-  const locB = GetPortalProperty(portalPair.portalA, "targetLoc");
-
-  // load chunk and remove portals
-  ensureChunkLoaded(dimA, locA, () => {
-    try {
-      activePortals.delete(portalPair.portalA);
-      portalPair.portalA.remove();
-    } catch { }
-  });
-
-  ensureChunkLoaded(dimB, locB, () => {
-    try {
-      activePortals.delete(portalPair.portalB);
-      portalPair.portalB.remove();
-    } catch { }
-  });
-
-  // unregister from tables
-  playerPortals.delete(ownerId);
-  linkTable.delete(linkId);
-  portalInfo.delete(portalPair.portalA);
-  portalInfo.delete(portalPair.portalB);
-}
-
-/**
- * Finds a safe location for a portal to spawn using a spiral search pattern.
- * Prioritizes proximity to the original location (bed/spawn point).
- * @param {import("@minecraft/server").Dimension} dim - The dimension to check.
- * @param {import("@minecraft/server").Vector3} loc - The starting center location.
- * @returns {import("@minecraft/server").Vector3} A safe spawn location.
- */
-function findSafeLocation(dim, loc) {
-  const maxRadius = 5;
-  const dyRange = 2;
-
-  for (let r = 0; r <= maxRadius; r++) {
-    for (let dy = 0; dy <= dyRange; dy++) {
-      const yOffsets = dy === 0 ? [0] : [dy, -dy];
-      for (const yOffset of yOffsets) {
-        const ty = Math.floor(loc.y + yOffset);
-
-        // Helper to check a specific XZ coordinate
-        const checkCoord = (dx, dz) => {
-          const tx = Math.floor(loc.x + dx);
-          const tz = Math.floor(loc.z + dz);
-          const blockBot = dim.getBlock({ x: tx, y: ty, z: tz });
-          const blockTop = dim.getBlock({ x: tx, y: ty + 1, z: tz });
-
-          if (blockBot?.isAir && blockTop?.isAir) {
-            const blockBelow = dim.getBlock({ x: tx, y: ty - 1, z: tz });
-            if (blockBelow && !blockBelow.isAir && !blockBelow.isLiquid) {
-              return { x: tx + 0.5, y: ty, z: tz + 0.5 };
+        maxDistance: 12,
+    });
+    const savedStructures = [];
+    let leashedMobs = new Set(), mountedMobs = new Set();
+    for (const mob of nearbyEntities) {
+        try {
+            const leashComponent = mob.getComponent(EntityComponentTypes.Leashable);
+            if (leashComponent && leashComponent.leashHolder && leashComponent.leashHolder.id === player.id) {
+                leashedMobs.add(mob);
             }
-          }
-          return null;
-        };
-
-        if (r === 0) {
-          const res = checkCoord(0, 0);
-          if (res) return res;
-        } else {
-          // Check edges of the square square at radius r
-          for (let i = -r; i <= r; i++) {
-            let res;
-            if ((res = checkCoord(i, -r))) return res; // Top
-            if ((res = checkCoord(i, r))) return res; // Bottom
-          }
-          for (let i = -r + 1; i < r; i++) {
-            let res;
-            if ((res = checkCoord(-r, i))) return res; // Left
-            if ((res = checkCoord(r, i))) return res; // Right
-          }
+            const rideComponent = mob.getComponent(EntityComponentTypes.Rideable);
+            if (rideComponent && rideComponent.getRiders().some(rider => rider.id === player.id)) {
+                rideComponent.ejectRiders();
+                mountedMobs.add(mob);
+            }
         }
-      }
+        catch { }
     }
-  }
-  return loc; // Fallback to original if no better spot found
-}
-
-/**
- *
- * @param {import("@minecraft/server").Dimension} dimension
- * @param {import("@minecraft/server").Vector3} location
- * @returns
- */
-function isChunkLoaded(dimension, location) {
-  const x = Math.floor(location.x);
-  const y = Math.floor(location.y);
-  const z = Math.floor(location.z);
-  try {
-    const block = dimension.getBlock({ x, y, z }); // Accessing a block forces chunk load
-    return !!block;
-  } catch {
-    return false;
-  }
-}
-
-/**
- * Forces a chunk at the specified location to load by creating a temporary ticking area,
- * then executes a callback once the area is active.
- * @param {import("@minecraft/server").Dimension} dimension - The dimension to load.
- * @param {import("@minecraft/server").Vector3} location - The location to ensure is loaded.
- * @param {Function} callback - The function to execute after the chunk loads.
- */
-function ensureChunkLoaded(dimension, location, callback) {
-  if (isChunkLoaded(dimension, location)) {
-    addTickingArea(dimension, location, true); // update ticking area to avoid being recycled
-    callback(); // Already loaded, direct call
-    return Promise.resolve();
-  }
-
-  let timeout = 100; // max attempts
-  const waitAndDo = (condition, callback) => {
-    system.runTimeout(() => {
-      if (condition() || --timeout <= 0) {
-        callback();
-      } else {
-        waitAndDo(condition, callback);
-      }
-    }, 5);
-  };
-
-  return addTickingArea(dimension, location)
-    .then(() => {
-      waitAndDo(
-        () => isChunkLoaded(dimension, location),
-        () => {
-          system.run(async () => {
-            try {
-              await callback();
-            } catch { }
-          });
+    const allMobs = [...leashedMobs, ...mountedMobs];
+    const mobsSaved = !!allMobs.length;
+    if (mobsSaved) {
+        nearbyEntities.forEach(mob => mob.addTag(nearbyTag)); // mark all nearby mobs
+        allMobs.forEach((mob, index) => {
+            const sName = `${structName}_${index}`;
+            const loc = mob.location;
+            if (leashedMobs.has(mob)) {
+                mob.addTag(leashTag);
+            }
+            if (mountedMobs.has(mob)) {
+                mob.addTag(mountTag);
+            }
+            mob.dimension.runCommand(`structure save "${sName}" ${Math.floor(loc.x)} ${Math.floor(loc.y)} ${Math.floor(loc.z)} ${Math.floor(loc.x)} ${Math.floor(loc.y)} ${Math.floor(loc.z)} true memory false`);
+            savedStructures.push(sName);
+            mob.removeTag(leashTag);
+            mob.removeTag(mountTag);
+        });
+        // save all mobs
+        player.dimension.runCommand(`structure save "${structName}" ${Math.floor(startPos.x)} ${Math.floor(startPos.y)} ${Math.floor(startPos.z)} ${Math.floor(startPos.x)} ${Math.floor(startPos.y)} ${Math.floor(startPos.z)} true memory false`);
+        nearbyEntities.forEach(mob => mob.removeTag(nearbyTag)); // remove temp tags
+        allMobs.forEach(mob => mob.remove()); // remove all teleported mobs;
+    }
+    const restoreMobs = (targetLocation) => {
+        if (mobsSaved) {
+            // release teleported mobs from structure
+            savedStructures.forEach(sName => {
+                dim.runCommand(`structure load "${sName}" ${targetLocation.x.toFixed(2)} ${targetLocation.y.toFixed(2)} ${targetLocation.z.toFixed(2)} 0_degrees none true false`);
+            });
+            const teleportedMobs = player.dimension.getEntities({
+                location: player.location,
+                maxDistance: 12,
+                tags: [nearbyTag]
+            });
+            teleportedMobs.forEach(mob => {
+                if (mob.hasTag(leashTag)) {
+                    mob.getComponent(EntityComponentTypes.Leashable)?.leashTo(player);
+                    mob.removeTag(leashTag);
+                    return;
+                }
+                if (mob.hasTag(mountTag)) {
+                    mob.getComponent(EntityComponentTypes.Rideable)?.addRider(player);
+                    mob.removeTag(mountTag);
+                    return;
+                }
+                mob.remove();
+            });
+            // clean up structures
+            savedStructures.forEach(sName => {
+                dim.runCommand(`structure delete "${sName}"`);
+            });
         }
-      );
-    })
-    .catch(() => {
-      // Fallback if ticking areas are full or command fails
-      callback();
+    };
+    player.teleport(location, { dimension: dim, keepVelocity: false, checkForBlocks: false }); // teleport player first, this will make minecraft load the chunk
+    waitForChunkLoad(dim, location).then(() => {
+        // now the chunk is loaded
+        setupPortal(portal); // setup portal if needed
+        const targetLocation = portal.location;
+        player.inputPermissions.setPermissionCategory(InputPermissionCategory.Movement, false);
+        player.teleport(targetLocation, { dimension: dim, keepVelocity: false, checkForBlocks: false }); // teleport again as minecraft may have moved the player slightly
+        player.playSound("diablo.portal_teleport", {
+            location: targetLocation,
+            pitch: 1.0,
+            volume: 1.0
+        });
+        system.runTimeout(() => {
+            player.inputPermissions.setPermissionCategory(InputPermissionCategory.Movement, true);
+            player.teleport(targetLocation, { dimension: dim, keepVelocity: false, checkForBlocks: false });
+            restoreMobs(targetLocation);
+            teleportingPlayers.delete(player.id); // teleport completed
+        }, 10);
+        player.dimension.spawnParticle("diablo:teleport", player.location); // teleport end effect
     });
 }
-
-/**
- * Garbage Collection: Remove orphaned portals not in registry
- */
-system.runInterval(() => {
-  const activeIds = new Set();
-  for (const portal of activePortals) {
-    if (portal.isValid) activeIds.add(portal.id);
-  }
-
-  ["overworld", "nether", "the_end"].forEach((dimId) => {
-    try {
-      const dim = world.getDimension(dimId);
-      const entities = dim.getEntities({ type: PORTAL_ENTITY });
-      for (const entity of entities) {
-        if (!activeIds.has(entity.id)) {
-          entity.remove();
+function destroyPortalPair(linkId, ownerId) {
+    const portalPair = GetPortalPair(linkId);
+    if (!portalPair)
+        return;
+    playerPortals.delete(ownerId);
+    linkTable.delete(linkId);
+    portalInfo.delete(portalPair.portalA);
+    portalInfo.delete(portalPair.portalB);
+}
+function findSafeLocation(dim, loc) {
+    const maxRadius = 5;
+    const dyRange = 2;
+    for (let dy = 0; dy <= dyRange; dy++) {
+        const yOffsets = dy === 0 ? [0] : [dy, -dy];
+        for (const yOffset of yOffsets) {
+            const ty = Math.floor(loc.y + yOffset);
+            for (let r = 0; r <= maxRadius; r++) {
+                const checkCoord = (dx, dz) => {
+                    const tx = Math.floor(loc.x + dx);
+                    const tz = Math.floor(loc.z + dz);
+                    const blockBot = dim.getBlock({ x: tx, y: ty, z: tz });
+                    const blockTop = dim.getBlock({ x: tx, y: ty + 1, z: tz });
+                    if (blockBot?.isAir && blockTop?.isAir) {
+                        const blockBelow = dim.getBlock({ x: tx, y: ty - 1, z: tz });
+                        if (blockBelow && !blockBelow.isAir && !blockBelow.isLiquid) {
+                            return { x: tx + 0.5, y: ty, z: tz + 0.5 };
+                        }
+                    }
+                    return null;
+                };
+                if (r === 0) {
+                    const res = checkCoord(0, 0);
+                    if (res)
+                        return res;
+                }
+                else {
+                    for (let i = -r; i <= r; i++) {
+                        let res;
+                        if ((res = checkCoord(i, -r)))
+                            return res;
+                        if ((res = checkCoord(i, r)))
+                            return res;
+                    }
+                    for (let i = -r + 1; i < r; i++) {
+                        let res;
+                        if ((res = checkCoord(-r, i)))
+                            return res;
+                        if ((res = checkCoord(r, i)))
+                            return res;
+                    }
+                }
+            }
         }
-      }
-    } catch (e) { }
-  });
-}, 200);
+    }
+    return loc;
+}
+function isChunkLoaded(dimension, location) {
+    try {
+        const block = dimension.getBlock({ x: Math.floor(location.x), y: Math.floor(location.y), z: Math.floor(location.z) });
+        return !!block;
+    }
+    catch {
+        return false;
+    }
+}
+function waitForChunkLoad(dimension, location) {
+    if (isChunkLoaded(dimension, location))
+        return Promise.resolve();
+    return new Promise((resolve) => {
+        let timer = system.runInterval(() => {
+            if (isChunkLoaded(dimension, location)) {
+                system.clearRun(timer);
+                resolve();
+            }
+        }, 5);
+    });
+}
+function ensureChunkLoaded(dimension, location, callback) {
+    if (isChunkLoaded(dimension, location)) {
+        addTickingArea(dimension, location, true);
+        callback();
+        return Promise.resolve();
+    }
+    let timeout = 100;
+    const waitAndDo = (condition, cb) => {
+        system.runTimeout(() => {
+            if (condition() || --timeout <= 0) {
+                cb();
+            }
+            else {
+                waitAndDo(condition, cb);
+            }
+        }, 5);
+    };
+    return addTickingArea(dimension, location)
+        .then(() => {
+        waitAndDo(() => isChunkLoaded(dimension, location), () => {
+            system.run(() => {
+                try {
+                    callback();
+                }
+                catch { }
+            });
+        });
+    })
+        .catch(() => {
+        callback();
+    });
+}

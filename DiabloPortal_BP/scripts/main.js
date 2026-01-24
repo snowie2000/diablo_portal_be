@@ -53,6 +53,9 @@ const portalInfo = new Map();
 const tickingAreas = new Map();
 let chunkLoaderCounter = 0;
 let portalIdCounter = 0;
+function sleep(tick) {
+    return new Promise((resolve) => system.runTimeout(resolve, tick));
+}
 // Register custom command: /footsteps:trail on|off
 system.beforeEvents.startup.subscribe((event) => {
     const registry = event.customCommandRegistry;
@@ -407,7 +410,7 @@ function checkPortalCollision(portal, currentTick, playersInPortal) {
         }
     }
 }
-function teleportPlayer(player, portal, currentTick) {
+async function teleportPlayer(player, portal, currentTick) {
     const { location, dim } = portal;
     player.dimension.spawnParticle("diablo:teleport", player.location); // teleport start effect
     teleportedPlayers.add(player.id);
@@ -492,6 +495,15 @@ function teleportPlayer(player, portal, currentTick) {
             });
         }
     };
+    player.camera.fade({
+        fadeColor: { red: 0.2, green: 0.2, blue: 0.2 },
+        fadeTime: {
+            fadeInTime: 0.1,
+            fadeOutTime: 0.5,
+            holdTime: 0.2
+        }
+    });
+    await sleep(2);
     player.teleport(location, { dimension: dim, keepVelocity: false, checkForBlocks: false }); // teleport player first, this will make minecraft load the chunk
     waitForChunkLoad(dim, location).then(() => {
         // now the chunk is loaded
@@ -499,18 +511,19 @@ function teleportPlayer(player, portal, currentTick) {
         const targetLocation = portal.location;
         player.inputPermissions.setPermissionCategory(InputPermissionCategory.Movement, false);
         player.teleport(targetLocation, { dimension: dim, keepVelocity: false, checkForBlocks: false }); // teleport again as minecraft may have moved the player slightly
-        player.playSound("diablo.portal_teleport", {
-            location: targetLocation,
-            pitch: 1.0,
-            volume: 1.0
-        });
         system.runTimeout(() => {
             player.inputPermissions.setPermissionCategory(InputPermissionCategory.Movement, true);
             player.teleport(targetLocation, { dimension: dim, keepVelocity: false, checkForBlocks: false });
             restoreMobs(targetLocation);
             teleportingPlayers.delete(player.id); // teleport completed
         }, 10);
-        player.dimension.spawnParticle("diablo:teleport", player.location); // teleport end effect
+        system.run(() => {
+            player.playSound("diablo.portal_teleport", {
+                location: targetLocation,
+                pitch: 1.0,
+                volume: 1.0
+            });
+        });
     });
 }
 function destroyPortalPair(linkId, ownerId) {

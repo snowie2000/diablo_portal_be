@@ -4,7 +4,7 @@
         "name": "Town Portal Addon",
         "description": "Diablo II Style Portals",
         "uuid": "66c6e9a8-3293-4e31-9793-2792d7714574",
-        "version": [1, 0, 2],
+        "version": [1, 0, 3],
         "min_engine_version": [1, 21, 0]
     },
     "modules": [
@@ -28,7 +28,7 @@
         },
         {
             "uuid": "8f2d5e3c-1b4a-4cce-9d9a-5f3b7c2e1a0d",
-            "version": [1, 0, 2]
+            "version": [1, 0, 3]
         }
     ]
 }

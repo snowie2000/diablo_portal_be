@@ -635,11 +635,6 @@ function teleportPlayerToPortal(player, portal, currentTick) {
  */
 function teleportEntitySafely(entity, targetLocation, targetDimension) {
   const originDim = entity.dimension;
-  if (originDim.id === targetDimension.id) {
-    // Same dimension, direct teleport
-    entity.teleport(targetLocation);
-    return entity;
-  }
 
   const structName = `tp_struct_${system.currentTick}`;
   const tagName = `tp_tag_${system.currentTick}`;

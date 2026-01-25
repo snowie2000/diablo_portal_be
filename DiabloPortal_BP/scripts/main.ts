@@ -187,7 +187,7 @@ function spawnPortal(dim: Dimension, location: Vector3, properties: PortalInfo):
         ...properties,
         locationDetermined: false,
         pid: ++PORTAL_PID,
-        location,
+        location: { x: location.x, y: Math.ceil(location.y), z: location.z },
         dim,
     }
     // if chunk is loaded, spawn immediately, and update location if needed
@@ -506,6 +506,7 @@ async function teleportPlayer(player: Player, portal: PortalCreationInfo, curren
 
     const leashTag = `leash_temp_${system.currentTick}`;
     const mountTag = `mount_temp_${system.currentTick}`;
+    const riderTag = `rider_temp_${system.currentTick}`;
     const structName = `dp_struct_${system.currentTick}`;
     const startPos = player.location;
     const nearbyTag = `nearby_temp_${system.currentTick}`;
@@ -516,27 +517,33 @@ async function teleportPlayer(player: Player, portal: PortalCreationInfo, curren
     });
     const savedStructures: string[] = [];
 
-    let leashedMobs: Set<Entity> = new Set(), mountedMobs: Set<Entity> = new Set();
+    let leashedMobs: Set<Entity> = new Set(), mountedMobs: Set<Entity> = new Set(), riddenMobs: Set<Entity> = new Set(), allMobs: Set<Entity> = new Set();
     for (const mob of nearbyEntities) {
         try {
             const leashComponent = mob.getComponent(EntityComponentTypes.Leashable) as EntityLeashableComponent | undefined;
             if (leashComponent && leashComponent.leashHolder && leashComponent.leashHolder.id === player.id) {
                 leashedMobs.add(mob);
+                allMobs.add(mob);
             }
             const rideComponent = mob.getComponent(EntityComponentTypes.Rideable) as EntityRideableComponent | undefined;
-            if (rideComponent && rideComponent.getRiders().some(rider => rider.id === player.id)) {
-                rideComponent.ejectRiders();
-                mountedMobs.add(mob);
+            if (rideComponent) {
+                const [playerRider, ...riders] = rideComponent.getRiders();
+                if (playerRider?.id === player.id) {
+                    mountedMobs.add(mob);
+                    riddenMobs = new Set(riders.filter(r => r.typeId !== "minecraft:player"));
+                    rideComponent.ejectRiders();
+                    allMobs.add(mob);
+                    riddenMobs.forEach(mob => allMobs.add(mob));
+                }
             }
         } catch { }
     }
 
-    const allMobs = [...leashedMobs, ...mountedMobs];
-    const mobsSaved = !!allMobs.length;
+    const mobsSaved = !!allMobs.size;
 
     if (mobsSaved) {
         nearbyEntities.forEach(mob => mob.addTag(nearbyTag)); // mark all nearby mobs
-        allMobs.forEach((mob, index) => {
+        Array.from(allMobs).forEach((mob, index) => {
             const sName = `${structName}_${index}`;
             const loc = mob.location;
             if (leashedMobs.has(mob)) {
@@ -545,10 +552,14 @@ async function teleportPlayer(player: Player, portal: PortalCreationInfo, curren
             if (mountedMobs.has(mob)) {
                 mob.addTag(mountTag);
             }
+            if (riddenMobs.has(mob)) {
+                mob.addTag(riderTag);
+            }
             mob.dimension.runCommand(`structure save "${sName}" ${Math.floor(loc.x)} ${Math.floor(loc.y)} ${Math.floor(loc.z)} ${Math.floor(loc.x)} ${Math.floor(loc.y)} ${Math.floor(loc.z)} true memory false`);
             savedStructures.push(sName);
             mob.removeTag(leashTag);
             mob.removeTag(mountTag);
+            mob.removeTag(riderTag);
         });
 
         // save all mobs
@@ -563,24 +574,39 @@ async function teleportPlayer(player: Player, portal: PortalCreationInfo, curren
             savedStructures.forEach(sName => {
                 dim.runCommand(`structure load "${sName}" ${targetLocation.x.toFixed(2)} ${targetLocation.y.toFixed(2)} ${targetLocation.z.toFixed(2)} 0_degrees none true false`);
             });
+            const teleportedRiders: Entity[] = [];
+            let teleportedMount: Entity | undefined;
             const teleportedMobs = player.dimension.getEntities({
                 location: player.location,
                 maxDistance: 12,
                 tags: [nearbyTag]
             });
             teleportedMobs.forEach(mob => {
+                let dumyMob = true;
                 if (mob.hasTag(leashTag)) {
                     (mob.getComponent(EntityComponentTypes.Leashable) as EntityLeashableComponent)?.leashTo(player);
                     mob.removeTag(leashTag);
-                    return;
+                    dumyMob = false;
                 }
                 if (mob.hasTag(mountTag)) {
                     (mob.getComponent(EntityComponentTypes.Rideable) as EntityRideableComponent)?.addRider(player);
                     mob.removeTag(mountTag);
-                    return;
+                    teleportedMount = mob;
+                    dumyMob = false;
                 }
-                mob.remove();
+                if (mob.hasTag(riderTag)) {
+                    teleportedRiders.push(mob);
+                    mob.removeTag(riderTag);
+                    dumyMob = false;
+                }
+                if (dumyMob)
+                    mob.remove();
             });
+            // re-attach riders to mount
+            if (teleportedMount) {
+                const rideComponent = teleportedMount.getComponent(EntityComponentTypes.Rideable) as EntityRideableComponent;
+                teleportedRiders.forEach(rider => rideComponent?.addRider(rider));
+            }
             // clean up structures
             savedStructures.forEach(sName => {
                 dim.runCommand(`structure delete "${sName}"`);
@@ -589,11 +615,11 @@ async function teleportPlayer(player: Player, portal: PortalCreationInfo, curren
     }
 
     player.camera.fade({
-        fadeColor: { red: 0.2, green: 0.2, blue: 0.2 },
+        fadeColor: { red: 1, green: 1, blue: 1 },
         fadeTime: {
             fadeInTime: 0.1,
             fadeOutTime: 0.5,
-            holdTime: 0.2
+            holdTime: 0.8
         }
     });
     await sleep(2);

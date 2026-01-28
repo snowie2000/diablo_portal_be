@@ -2,7 +2,8 @@
   "scripts": {
     "build": "tsc"
   },
-  "dependencies": {
+  "devDependencies": {
+    "@minecraft/server": "^2.4.0",
     "typescript": "^5.9.3"
   }
 }

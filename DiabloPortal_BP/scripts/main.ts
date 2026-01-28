@@ -53,7 +53,7 @@ interface PortalInfo {
     targetPortal: number;
     ownerId: string;
     isBase: boolean;
-    linkId?: number;
+    linkId?: string;
     facingRot?: number;
     colorParticle?: string;
     creating?: boolean;
@@ -79,17 +79,12 @@ interface PortalCreationInfo extends PortalInfo {
 }
 
 // --- Runtime State (Optimized Registry) ---
-const activePortals: Set<Entity> = new Set();
-const playerPortals: Map<string, number> = new Map(); // PlayerID -> LinkID
 const playerCooldowns: Map<string, number> = new Map(); // PlayerID -> ExpiryTick
 const teleportedPlayers: Set<string> = new Set(); // PlayerID
 const teleportingPlayers: Set<string> = new Set(); // PlayerID
 const portalCreatingPlayers: Set<string> = new Set(); // PlayerID
-const linkTable: Map<number, LinkInfo> = new Map(); // LinkID -> { portalA, portalB }
+const linkTable: Map<string, LinkInfo> = new Map(); // LinkID -> { portalA, portalB }
 const portalInfo: Map<number, PortalCreationInfo> = new Map();
-const tickingAreas: Map<string, TickingAreaInfo> = new Map();
-let chunkLoaderCounter = 0;
-let portalIdCounter = 0;
 
 function sleep(tick: number): Promise<void> {
     return new Promise((resolve) => system.runTimeout(resolve, tick));
@@ -129,46 +124,8 @@ system.beforeEvents.startup.subscribe((event) => {
     );
 });
 
-/**
- * Adds or updates a ticking area for portal loading.
- */
-function addTickingArea(dim: Dimension, location: Vector3, updateOnly = false): Promise<void> {
-    const name = `portal_loader_${location.x}_${location.y}_${location.z}_${dim.id}`;
-    if (tickingAreas.has(name)) {
-        const info = tickingAreas.get(name)!;
-        info.lastUsedTick = system.currentTick;
-        return Promise.resolve();
-    }
-    if (updateOnly) return Promise.resolve();
 
-    tickingAreas.set(name, {
-        dimension: dim,
-        location,
-        lastUsedTick: system.currentTick,
-    });
-    system.run(() => {
-        dim.runCommand(
-            `tickingarea add circle ${Math.floor(location.x)} ${Math.floor(
-                location.y
-            )} ${Math.floor(location.z)} 2 ${name} false`
-        );
-    });
-    return Promise.resolve();
-}
-
-system.runInterval(() => {
-    const currentTick = system.currentTick;
-    for (const [name, info] of tickingAreas) {
-        if (currentTick - info.lastUsedTick > 600) {
-            system.run(() => {
-                info.dimension.runCommand(`tickingarea remove ${name}`);
-            });
-            tickingAreas.delete(name);
-        }
-    }
-}, 100);
-
-function GetPortalPair(linkId: number): LinkInfo | undefined {
+function GetPortalPair(linkId: string): LinkInfo | undefined {
     return linkTable.get(linkId);
 }
 
@@ -187,7 +144,7 @@ function spawnPortal(dim: Dimension, location: Vector3, properties: PortalInfo):
         ...properties,
         locationDetermined: false,
         pid: ++PORTAL_PID,
-        location: { x: location.x, y: Math.ceil(location.y), z: location.z },
+        location: { x: location.x, y: Math.round(location.y+0.2), z: location.z },
         dim,
     }
     // if chunk is loaded, spawn immediately, and update location if needed
@@ -198,31 +155,10 @@ function spawnPortal(dim: Dimension, location: Vector3, properties: PortalInfo):
     return portal;
 }
 
-/**
- * Initialize registry on start
- */
-system.run(() => {
-    ["overworld", "nether", "the_end"].forEach((dimId) => {
-        try {
-            const dim = world.getDimension(dimId);
-            const entities = dim.getEntities({
-                type: PORTAL_ENTITY,
-                tags: ["active_portal"],
-            });
-            for (const entity of entities) {
-                entity.remove(); // Clean up old portals on startup
-            }
-            dim.runCommand(`tickingarea remove_all`);
-        } catch (e) { }
-    });
-});
-
-/**
- * Track new portals spawned
- */
-world.afterEvents.entitySpawn.subscribe((event) => {
-    if (event.entity?.typeId === PORTAL_ENTITY) {
-        activePortals.add(event.entity);
+world.afterEvents.entityDie.subscribe((event) => {
+    if (event.deadEntity.typeId === "minecraft:player") {
+        teleportedPlayers.add(event.deadEntity.id);
+        playerCooldowns.set(event.deadEntity.id, system.currentTick + 10000);   // prevent respawn player from being teleported
     }
 });
 
@@ -234,15 +170,16 @@ world.afterEvents.playerSpawn.subscribe((event) => {
         event.player.sendMessage("§6Diablo Portal System §av1.0.0");
     }
     teleportedPlayers.add(event.player.id);
+    playerCooldowns.set(event.player.id, system.currentTick + TELEPORT_COOLDOWN_DURATION);
 });
 
 /**
  * Event: Player Leave
  */
 world.afterEvents.playerLeave.subscribe((event) => {
-    const linkId = playerPortals.get(event.playerId);
+    const linkId = event.playerId;
     if (linkId !== undefined) {
-        destroyPortalPair(linkId, event.playerId);
+        destroyPortalPair(linkId);
     }
     teleportedPlayers.delete(event.playerId);
     teleportingPlayers.delete(event.playerId);
@@ -270,9 +207,9 @@ world.beforeEvents.itemUse.subscribe((event) => {
     // Use system.run to modify world state from a beforeEvent
     system.run(() => {
         const closePortal = () => {
-            const oldLinkId = playerPortals.get(player.id);
+            const oldLinkId = player.id;
             if (oldLinkId !== undefined) {
-                destroyPortalPair(oldLinkId, player.id);
+                destroyPortalPair(oldLinkId);
             }
         };
 
@@ -335,7 +272,7 @@ world.beforeEvents.itemUse.subscribe((event) => {
         const colorParticle = PORTAL_COLORS[colorIndex];
 
         const rotY = player.getRotation().y;
-        const linkId = ++portalIdCounter;
+        const linkId = player.id;
         const fieldPortal = spawnPortal(originDim, spawnLoc, {
             targetPortal: -1,
             ownerId: player.id,
@@ -356,7 +293,6 @@ world.beforeEvents.itemUse.subscribe((event) => {
         });
         fieldPortal.targetPortal = basePortal.pid;  // interlink portals
         linkTable.set(linkId, { portalA: fieldPortal.pid, portalB: basePortal.pid });
-        playerPortals.set(player.id, linkId);
 
         // notify player about portal creation
         player.sendMessage("§bTown Portal opened!");
@@ -490,7 +426,7 @@ function checkPortalCollision(portal: PortalCreationInfo, currentTick: number, p
 
         // close portal if it's a base portal and the player is the owner
         if (player.id === ownerId && isBase && linkId !== undefined) {
-            destroyPortalPair(linkId, player.id);
+            destroyPortalPair(linkId);
             player.sendMessage("§cTown Portal closed.");
         }
     }
@@ -646,38 +582,69 @@ async function teleportPlayer(player: Player, portal: PortalCreationInfo, curren
     });
 }
 
-function destroyPortalPair(linkId: number, ownerId: string): void {
+function destroyPortalPair(linkId: string): void {
     const portalPair = GetPortalPair(linkId);
     if (!portalPair) return;
 
-    playerPortals.delete(ownerId);
     linkTable.delete(linkId);
     portalInfo.delete(portalPair.portalA);
     portalInfo.delete(portalPair.portalB);
 }
 
 function findSafeLocation(dim: Dimension, loc: Vector3): Vector3 {
+    let searchCenter = { ...loc };
+
+    // 1. Search in a 3x3x3 area around loc for a bed or a respawn anchor
+    const range = 3;
+    let found = false;
+    for (let dx = -range; dx <= range && !found; dx++) {
+        for (let dy = -range; dy <= range && !found; dy++) {
+            for (let dz = -range; dz <= range && !found; dz++) {
+                try {
+                    const block = dim.getBlock({
+                        x: Math.floor(loc.x + dx),
+                        y: Math.floor(loc.y + dy),
+                        z: Math.floor(loc.z + dz)
+                    });
+                    if (block && (block.typeId.includes("bed") || block.typeId === "minecraft:respawn_anchor")) {
+                        searchCenter = {
+                            x: block.location.x + 0.5,
+                            y: block.location.y,
+                            z: block.location.z + 0.5
+                        };
+                        found = true;
+                    }
+                } catch (e) { }
+            }
+        }
+    }
+
     const maxRadius = 5;
     const dyRange = 2;
 
     for (let dy = 0; dy <= dyRange; dy++) {
         const yOffsets = dy === 0 ? [0] : [dy, -dy];
         for (const yOffset of yOffsets) {
-            const ty = Math.floor(loc.y + yOffset);
+            const ty = Math.floor(searchCenter.y + yOffset);
 
             for (let r = 0; r <= maxRadius; r++) {
                 const checkCoord = (dx: number, dz: number) => {
-                    const tx = Math.floor(loc.x + dx);
-                    const tz = Math.floor(loc.z + dz);
+                    const tx = Math.floor(searchCenter.x + dx);
+                    const tz = Math.floor(searchCenter.z + dz);
                     const blockBot = dim.getBlock({ x: tx, y: ty, z: tz });
                     const blockTop = dim.getBlock({ x: tx, y: ty + 1, z: tz });
 
                     if (blockBot?.isAir && blockTop?.isAir) {
                         const blockBelow = dim.getBlock({ x: tx, y: ty - 1, z: tz });
+                        const blockBelow2 = dim.getBlock({ x: tx, y: ty - 2, z: tz });
                         if (blockBelow && !blockBelow.isAir && !blockBelow.isLiquid) {
                             return { x: tx + 0.5, y: ty, z: tz + 0.5 };
                         }
+                        if (blockBelow2 && (blockBelow2.isAir || blockBelow2.isLiquid)) {
+                            return { x: tx + 0.5, y: ty - 1, z: tz + 0.5 };
+                        }
                     }
+                    // dim.spawnParticle("minecraft:mobflame_emitter", { x: tx + 0.5, y: ty + 1, z: tz + 0.5 });
                     return null;
                 };
 
@@ -699,7 +666,7 @@ function findSafeLocation(dim: Dimension, loc: Vector3): Vector3 {
             }
         }
     }
-    return loc;
+    return searchCenter;
 }
 
 function isChunkLoaded(dimension: Dimension, location: Vector3): boolean {
@@ -722,41 +689,5 @@ function waitForChunkLoad(dimension: Dimension, location: Vector3): Promise<void
             }
         }, 5);
     });
-}
-
-function ensureChunkLoaded(dimension: Dimension, location: Vector3, callback: () => void): Promise<void> {
-    if (isChunkLoaded(dimension, location)) {
-        addTickingArea(dimension, location, true);
-        callback();
-        return Promise.resolve();
-    }
-
-    let timeout = 100;
-    const waitAndDo = (condition: () => boolean, cb: () => void) => {
-        system.runTimeout(() => {
-            if (condition() || --timeout <= 0) {
-                cb();
-            } else {
-                waitAndDo(condition, cb);
-            }
-        }, 5);
-    };
-
-    return addTickingArea(dimension, location)
-        .then(() => {
-            waitAndDo(
-                () => isChunkLoaded(dimension, location),
-                () => {
-                    system.run(() => {
-                        try {
-                            callback();
-                        } catch { }
-                    });
-                }
-            );
-        })
-        .catch(() => {
-            callback();
-        });
 }
 

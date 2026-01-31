@@ -1,4 +1,4 @@
-import { world, system, Dimension, Entity, CommandPermissionLevel, InputPermissionCategory, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode, Vector3, Player, EntityLeashableComponent, EntityRideableComponent } from "@minecraft/server";
+import { world, system, Dimension, Entity, CommandPermissionLevel, InputPermissionCategory, LiquidType, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode, Vector3, Player, EntityLeashableComponent, EntityRideableComponent, Block } from "@minecraft/server";
 
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
@@ -7,17 +7,70 @@ const ITEM_ID_PERMANENT = "diablo:town_scroll_permanent";
 const TELEPORT_COOLDOWN_DURATION = 40; // Ticks (2 seconds)
 let PORTAL_PID = 0;
 
-// --- Portal Colors ---
-const PORTAL_COLORS_NATIVE = [
-    "minecraft:villager_happy",
-    "minecraft:green_flame_particle",
-    "minecraft:sculk_sensor_redstone_particle",
-    "minecraft:redstone_repeater_dust_particle",
-    //"minecraft:obsidian_glow_dust_particle",
-    "minecraft:candle_flame_particle",
-    "minecraft:basic_flame_particle",
-    "minecraft:blue_flame_particle",
-];
+const NON_SOLID_BLOCKS = new Set([
+    // 空气与特殊
+    "minecraft:air",
+    "minecraft:structure_void",
+    "minecraft:light_block",
+
+    // 植物与自然
+    "minecraft:grass",
+    "minecraft:tallgrass",
+    "minecraft:fern",
+    "minecraft:large_fern",
+    "minecraft:deadbush",
+    "minecraft:yellow_flower",  // 蒲公英
+    "minecraft:red_flower",     // 玫瑰/波斯菊等
+    "minecraft:torchflower",
+    "minecraft:pink_petals",
+    "minecraft:sugar_cane",     // 甘蔗
+    "minecraft:reeds",          // 甘蔗的内部ID
+    "minecraft:sapling",
+    "minecraft:bamboo_sapling",
+    "minecraft:brown_mushroom",
+    "minecraft:red_mushroom",
+    "minecraft:crimson_fungus",
+    "minecraft:warped_fungus",
+    "minecraft:crimson_roots",
+    "minecraft:warped_roots",
+    "minecraft:nether_sprouts",
+    "minecraft:wheat",
+    "minecraft:carrots",
+    "minecraft:potatoes",
+    "minecraft:beetroot",
+    "minecraft:sweet_berry_bush",
+
+    // 攀爬与覆盖物
+    "minecraft:vine",           // 藤蔓
+    "minecraft:ladder",         // 梯子（虽可攀爬但不可像方块一样站立）
+    "minecraft:glow_lichen",    // 发光地衣
+    "minecraft:sculk_vein",     // 幽匿脉络
+    "minecraft:hanging_roots",  // 垂根
+    "minecraft:cave_vines",     // 洞穴藤蔓
+
+    // 红石与装饰
+    "minecraft:redstone_wire",
+    "minecraft:repeater",
+    "minecraft:comparator",
+    "minecraft:lever",
+    "minecraft:torch",
+    "minecraft:soul_torch",
+    "minecraft:redstone_torch",
+    "minecraft:tripwire",
+    "minecraft:tripwire_hook",
+    "minecraft:string",
+    "minecraft:stone_button",
+    "minecraft:wooden_button",
+    "minecraft:carpet",         // 地毯
+    "minecraft:moss_carpet",    // 苔藓地毯
+    "minecraft:snow_layer",     // 雪层 (高度为0时)
+
+    // 铁轨
+    "minecraft:rail",
+    "minecraft:golden_rail",
+    "minecraft:detector_rail",
+    "minecraft:activator_rail"
+]);
 
 enum PortalType {
     Field = 0,
@@ -144,7 +197,7 @@ function spawnPortal(dim: Dimension, location: Vector3, properties: PortalInfo):
         ...properties,
         locationDetermined: false,
         pid: ++PORTAL_PID,
-        location: { x: location.x, y: Math.round(location.y+0.2), z: location.z },
+        location: { x: location.x, y: Math.round(location.y + 0.2), z: location.z },
         dim,
     }
     // if chunk is loaded, spawn immediately, and update location if needed
@@ -591,6 +644,11 @@ function destroyPortalPair(linkId: string): void {
     portalInfo.delete(portalPair.portalB);
 }
 
+function isSolidBlock(b: Block): boolean {
+    return b.isValid && !b.isAir && !b.isLiquid &&
+        !b.permutation.canBeDestroyedByLiquidSpread(LiquidType.Water) && !NON_SOLID_BLOCKS.has(b.typeId);
+}
+
 function findSafeLocation(dim: Dimension, loc: Vector3): Vector3 {
     let searchCenter = { ...loc };
 
@@ -637,10 +695,10 @@ function findSafeLocation(dim: Dimension, loc: Vector3): Vector3 {
                     if (blockBot?.isAir && blockTop?.isAir) {
                         const blockBelow = dim.getBlock({ x: tx, y: ty - 1, z: tz });
                         const blockBelow2 = dim.getBlock({ x: tx, y: ty - 2, z: tz });
-                        if (blockBelow && !blockBelow.isAir && !blockBelow.isLiquid) {
+                        if (blockBelow && isSolidBlock(blockBelow)) {
                             return { x: tx + 0.5, y: ty, z: tz + 0.5 };
                         }
-                        if (blockBelow2 && (blockBelow2.isAir || blockBelow2.isLiquid)) {
+                        if (blockBelow2 && isSolidBlock(blockBelow2)) {
                             return { x: tx + 0.5, y: ty - 1, z: tz + 0.5 };
                         }
                     }

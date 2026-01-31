@@ -1,21 +1,70 @@
-import { world, system, CommandPermissionLevel, InputPermissionCategory, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode, Player } from "@minecraft/server";
+import { world, system, CommandPermissionLevel, InputPermissionCategory, LiquidType, EntityComponentTypes, MolangVariableMap, CustomCommandParamType, GameMode, Player } from "@minecraft/server";
 // --- Configuration ---
 const PORTAL_ENTITY = "diablo:portal_marker";
 const ITEM_ID = "diablo:town_scroll";
 const ITEM_ID_PERMANENT = "diablo:town_scroll_permanent";
 const TELEPORT_COOLDOWN_DURATION = 40; // Ticks (2 seconds)
 let PORTAL_PID = 0;
-// --- Portal Colors ---
-const PORTAL_COLORS_NATIVE = [
-    "minecraft:villager_happy",
-    "minecraft:green_flame_particle",
-    "minecraft:sculk_sensor_redstone_particle",
-    "minecraft:redstone_repeater_dust_particle",
-    //"minecraft:obsidian_glow_dust_particle",
-    "minecraft:candle_flame_particle",
-    "minecraft:basic_flame_particle",
-    "minecraft:blue_flame_particle",
-];
+const NON_SOLID_BLOCKS = new Set([
+    // 空气与特殊
+    "minecraft:air",
+    "minecraft:structure_void",
+    "minecraft:light_block",
+    // 植物与自然
+    "minecraft:grass",
+    "minecraft:tallgrass",
+    "minecraft:fern",
+    "minecraft:large_fern",
+    "minecraft:deadbush",
+    "minecraft:yellow_flower", // 蒲公英
+    "minecraft:red_flower", // 玫瑰/波斯菊等
+    "minecraft:torchflower",
+    "minecraft:pink_petals",
+    "minecraft:sugar_cane", // 甘蔗
+    "minecraft:reeds", // 甘蔗的内部ID
+    "minecraft:sapling",
+    "minecraft:bamboo_sapling",
+    "minecraft:brown_mushroom",
+    "minecraft:red_mushroom",
+    "minecraft:crimson_fungus",
+    "minecraft:warped_fungus",
+    "minecraft:crimson_roots",
+    "minecraft:warped_roots",
+    "minecraft:nether_sprouts",
+    "minecraft:wheat",
+    "minecraft:carrots",
+    "minecraft:potatoes",
+    "minecraft:beetroot",
+    "minecraft:sweet_berry_bush",
+    // 攀爬与覆盖物
+    "minecraft:vine", // 藤蔓
+    "minecraft:ladder", // 梯子（虽可攀爬但不可像方块一样站立）
+    "minecraft:glow_lichen", // 发光地衣
+    "minecraft:sculk_vein", // 幽匿脉络
+    "minecraft:hanging_roots", // 垂根
+    "minecraft:cave_vines", // 洞穴藤蔓
+    // 红石与装饰
+    "minecraft:redstone_wire",
+    "minecraft:repeater",
+    "minecraft:comparator",
+    "minecraft:lever",
+    "minecraft:torch",
+    "minecraft:soul_torch",
+    "minecraft:redstone_torch",
+    "minecraft:tripwire",
+    "minecraft:tripwire_hook",
+    "minecraft:string",
+    "minecraft:stone_button",
+    "minecraft:wooden_button",
+    "minecraft:carpet", // 地毯
+    "minecraft:moss_carpet", // 苔藓地毯
+    "minecraft:snow_layer", // 雪层 (高度为0时)
+    // 铁轨
+    "minecraft:rail",
+    "minecraft:golden_rail",
+    "minecraft:detector_rail",
+    "minecraft:activator_rail"
+]);
 var PortalType;
 (function (PortalType) {
     PortalType[PortalType["Field"] = 0] = "Field";
@@ -42,17 +91,12 @@ const PORTAL_WIDTH = 0.8;
 const PORTAL_HEIGHT = 1.2;
 const PARTICLES_PER_TICK = 5;
 // --- Runtime State (Optimized Registry) ---
-const activePortals = new Set();
-const playerPortals = new Map(); // PlayerID -> LinkID
 const playerCooldowns = new Map(); // PlayerID -> ExpiryTick
 const teleportedPlayers = new Set(); // PlayerID
 const teleportingPlayers = new Set(); // PlayerID
 const portalCreatingPlayers = new Set(); // PlayerID
 const linkTable = new Map(); // LinkID -> { portalA, portalB }
 const portalInfo = new Map();
-const tickingAreas = new Map();
-let chunkLoaderCounter = 0;
-let portalIdCounter = 0;
 function sleep(tick) {
     return new Promise((resolve) => system.runTimeout(resolve, tick));
 }
@@ -132,9 +176,9 @@ world.afterEvents.playerSpawn.subscribe((event) => {
  * Event: Player Leave
  */
 world.afterEvents.playerLeave.subscribe((event) => {
-    const linkId = playerPortals.get(event.playerId);
+    const linkId = event.playerId;
     if (linkId !== undefined) {
-        destroyPortalPair(linkId, event.playerId);
+        destroyPortalPair(linkId);
     }
     teleportedPlayers.delete(event.playerId);
     teleportingPlayers.delete(event.playerId);
@@ -160,9 +204,9 @@ world.beforeEvents.itemUse.subscribe((event) => {
     // Use system.run to modify world state from a beforeEvent
     system.run(() => {
         const closePortal = () => {
-            const oldLinkId = playerPortals.get(player.id);
+            const oldLinkId = player.id;
             if (oldLinkId !== undefined) {
-                destroyPortalPair(oldLinkId, player.id);
+                destroyPortalPair(oldLinkId);
             }
         };
         const originDim = player.dimension;
@@ -207,7 +251,7 @@ world.beforeEvents.itemUse.subscribe((event) => {
         const colorIndex = (userColorIndex ?? Math.abs(player.id.split("").reduce((a, b) => (a << 5) - a + b.charCodeAt(0), 0))) % PORTAL_COLORS.length;
         const colorParticle = PORTAL_COLORS[colorIndex];
         const rotY = player.getRotation().y;
-        const linkId = ++portalIdCounter;
+        const linkId = player.id;
         const fieldPortal = spawnPortal(originDim, spawnLoc, {
             targetPortal: -1,
             ownerId: player.id,
@@ -228,7 +272,6 @@ world.beforeEvents.itemUse.subscribe((event) => {
         });
         fieldPortal.targetPortal = basePortal.pid; // interlink portals
         linkTable.set(linkId, { portalA: fieldPortal.pid, portalB: basePortal.pid });
-        playerPortals.set(player.id, linkId);
         // notify player about portal creation
         player.sendMessage("§bTown Portal opened!");
         try {
@@ -352,7 +395,7 @@ function checkPortalCollision(portal, currentTick, playersInPortal) {
         teleportPlayer(player, targetPortal, currentTick);
         // close portal if it's a base portal and the player is the owner
         if (player.id === ownerId && isBase && linkId !== undefined) {
-            destroyPortalPair(linkId, player.id);
+            destroyPortalPair(linkId);
             player.sendMessage("§cTown Portal closed.");
         }
     }
@@ -499,14 +542,17 @@ async function teleportPlayer(player, portal, currentTick) {
         });
     });
 }
-function destroyPortalPair(linkId, ownerId) {
+function destroyPortalPair(linkId) {
     const portalPair = GetPortalPair(linkId);
     if (!portalPair)
         return;
-    playerPortals.delete(ownerId);
     linkTable.delete(linkId);
     portalInfo.delete(portalPair.portalA);
     portalInfo.delete(portalPair.portalB);
+}
+function isSolidBlock(b) {
+    return b.isValid && !b.isAir && !b.isLiquid &&
+        !b.permutation.canBeDestroyedByLiquidSpread(LiquidType.Water) && !NON_SOLID_BLOCKS.has(b.typeId);
 }
 function findSafeLocation(dim, loc) {
     let searchCenter = { ...loc };
@@ -550,10 +596,10 @@ function findSafeLocation(dim, loc) {
                     if (blockBot?.isAir && blockTop?.isAir) {
                         const blockBelow = dim.getBlock({ x: tx, y: ty - 1, z: tz });
                         const blockBelow2 = dim.getBlock({ x: tx, y: ty - 2, z: tz });
-                        if (blockBelow && !blockBelow.isAir && !blockBelow.isLiquid) {
+                        if (blockBelow && isSolidBlock(blockBelow)) {
                             return { x: tx + 0.5, y: ty, z: tz + 0.5 };
                         }
-                        if (blockBelow2 && (blockBelow2.isAir || blockBelow2.isLiquid)) {
+                        if (blockBelow2 && isSolidBlock(blockBelow2)) {
                             return { x: tx + 0.5, y: ty - 1, z: tz + 0.5 };
                         }
                     }

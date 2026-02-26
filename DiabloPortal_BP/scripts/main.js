@@ -74,22 +74,19 @@ const PORTAL_COLORS = [
     "diablo:portal_blue",
     "diablo:portal_green",
     "diablo:portal_red",
-    "diablo:portal_yellow"
+    "diablo:portal_yellow",
+    ["diablo:portal_blue", "diablo:portal_green"],
+    ["diablo:portal_blue", "diablo:portal_red"],
+    ["diablo:portal_blue", "diablo:portal_yellow"],
+    ["diablo:portal_green", "diablo:portal_red"],
+    ["diablo:portal_green", "diablo:portal_yellow"],
+    ["diablo:portal_red", "diablo:portal_yellow"],
+    ["diablo:portal_blue", "diablo:portal_green", "diablo:portal_red"],
+    ["diablo:portal_blue", "diablo:portal_green", "diablo:portal_yellow"],
+    ["diablo:portal_blue", "diablo:portal_red", "diablo:portal_yellow"],
+    ["diablo:portal_green", "diablo:portal_red", "diablo:portal_yellow"],
+    ["diablo:portal_blue", "diablo:portal_green", "diablo:portal_red", "diablo:portal_yellow"]
 ];
-const PORTAL_COLORS_CREATING = [
-    "diablo:portal_creating_blue",
-    "diablo:portal_creating_green",
-    "diablo:portal_creating_red",
-    "diablo:portal_creating_yellow"
-];
-const PORTAL_INTERNAL_PARTICLE = "minecraft:end_chest";
-// const PORTAL_INTERNAL_PARTICLE = "minecraft:portal_directional";
-const PORTAL_COUNT = 3;
-const PORTAL_INTERVAL = 3;
-// --- Visual Settings ---
-const PORTAL_WIDTH = 0.8;
-const PORTAL_HEIGHT = 1.2;
-const PARTICLES_PER_TICK = 5;
 // --- Runtime State (Optimized Registry) ---
 const playerCooldowns = new Map(); // PlayerID -> ExpiryTick
 const teleportedPlayers = new Set(); // PlayerID
@@ -146,6 +143,7 @@ function spawnPortal(dim, location, properties) {
         ...properties,
         locationDetermined: false,
         pid: ++PORTAL_PID,
+        colorIndex: 0,
         location: { x: location.x, y: Math.round(location.y + 0.2), z: location.z },
         dim,
     };
@@ -348,14 +346,26 @@ function drawPortalEffects(portal) {
     const location = portal.location;
     const dim = portal.dim;
     const rotDeg = portal.facingRot || 0;
-    const particleType = portal.colorParticle || "minecraft:blue_flame_particle";
+    const particleType = portal.colorParticle || "diablo:portal_blue";
     const vars = new MolangVariableMap();
     vars.setFloat("variable.portal_yaw", rotDeg + 180);
-    dim.spawnParticle(particleType, {
-        x: location.x,
-        y: location.y + 1.2,
-        z: location.z,
-    }, vars);
+    if (typeof particleType === "string") {
+        dim.spawnParticle(particleType, {
+            x: location.x,
+            y: location.y + 1.2,
+            z: location.z,
+        }, vars);
+    }
+    else if (Array.isArray(particleType)) {
+        const index = portal.colorIndex || 0;
+        const type = particleType[index % particleType.length];
+        dim.spawnParticle(type, {
+            x: location.x,
+            y: location.y + 1.2,
+            z: location.z,
+        }, vars);
+        portal.colorIndex = (index + 1) % particleType.length; // cycle through colors
+    }
 }
 /*
 function drawPortalSpiralEffects(portal: Entity): void {
